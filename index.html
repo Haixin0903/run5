@@ -1,0 +1,3461 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>跳一跳</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #0f1114;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #e8eaed;
+    overflow: hidden;
+  }
+  #wrap {
+    position: relative;
+    width: 100%;
+    max-width: min(430px, calc(100vh * 9 / 16));
+    aspect-ratio: 9 / 16;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 18px;
+    background: linear-gradient(#262d36 0%, #39424c 55%, #1f242a 100%);
+    touch-action: manipulation;
+  }
+  #codeInput {
+    position: absolute;
+    z-index: 5;
+    border: 1px solid rgba(255,255,255,.12);
+    background: rgba(255,255,255,.05);
+    color: #f3f4f6;
+    border-radius: 13px;
+    font-size: 15px;
+    letter-spacing: .01em;
+    padding: 0 14px;
+    margin: 0;
+    width: 1px;
+    height: 1px;
+    outline: none;
+    caret-color: #7cc8eb;
+    pointer-events: auto;
+    font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  }
+  #codeInput::placeholder { color: rgba(243,244,246,.3); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <input id="codeInput" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" enterkeyhint="done" placeholder="请输入兑换码" />
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const codeInput = document.getElementById('codeInput');
+const ctx = canvas.getContext('2d');
+
+// 逻辑分辨率，画面按比例缩放（9:16 竖版）
+const W = 405, H = 720;
+// 高分屏适配：画布物理像素按 DPR 放大，绘制仍用逻辑坐标，避免拉伸发糊；
+// 上限取 1.5，避免高 DPR 手机上物理像素填充率过高导致掉帧
+const DPR = Math.min(window.devicePixelRatio || 1, 1.5);
+canvas.width = W * DPR;
+canvas.height = H * DPR;
+ctx.scale(DPR, DPR);
+
+// ---------- 状态 ----------
+const GROUND_Y = 630;
+const GRAVITY = 2400;
+const JUMP_V = -820;
+const SPRING_V = JUMP_V * 1.35; // 弹跳板力度：比普通跳更高
+
+let state = 'splash'; // splash | ready | diff | playing | paused | dead | shop | skins | maps | settings | log
+let splashTimer = 0;  // 开屏动画累计秒数
+let readyTime = 0;    // 主页停留累计秒数（标题漂浮动效用）
+const SPLASH_DUR = 1.5;
+
+// ---------- 版本号与更新记录 ----------
+// 每次修改后递增 APP_VERSION（1.4.2 → 1.4.3 …），并在 CHANGELOG 顶部追加一条本版改动；
+// 设置页右上角展示当前版本，设置页内「更新日志」可查看完整记录。
+// 更新日志：
+//   1.4.2  极简 UI：去掉面板描边/内高光与多余卡片底色，次级按钮改纯文字，HUD 去胶囊，
+//        难度/设置改分隔线行式，主页次级入口并为一行
+//   1.4.1  新增「更新日志」页：按版本倒序列出每次改动，后续版本继续在此追加
+//   1.4  UI 视觉系统重做：统一暗色玻璃面板与字号/圆角令牌；HUD 重排（大分数、
+//        三段生命、燃料细条、货币合并芯片）；主页改全屏暗幕版式；难度/设置改列表式单选；
+//        暂停/结算/商店/装扮/地图统一按钮层级与选中态
+//   1.3  翅膀改为燃料喷气：一箱燃料 4.2 秒，点按托举额外耗油、松手滑翔下沉、贴地即收翅膀；
+//        飞行中金币串刷到高空；HUD 改显示燃料余量（低于 0.9 秒转琥珀色）
+//   1.2  手感与公平性重做：土狼时间 / 跳跃缓冲、压扁拉伸、震屏与顿帧、拾取飘字与扬尘；
+//        障碍改距离制生成并按跳跃滞空距离保证最小间距；金币改弧形串；存档节流、切后台自动暂停
+//   1.1.1  修复牛仔帽与角色头部穿模
+//   1.1  雪天地图细节（积雪描边 / 落地脚印 / 寒风音效）+ 性能优化（DPR 上限、样式与渐变缓存）
+//   1.0  初版：跑酷核心玩法、金币钻石、钻石复活、兑换码、皮肤与多地图
+const APP_VERSION = '1.4.2';
+// 更新日志数据：新增版本时在数组最前面插入一条即可（v 版本号 / name 本次主题 / items 改动点）
+const CHANGELOG = [
+  { v: '1.4.2', name: '极简整理', items: [
+    '去掉面板描边、内高光与多余卡片底色',
+    '次级按钮改为纯文字，主操作统一白色胶囊',
+    'HUD 去掉货币胶囊与连击底板，改纯文字',
+    '难度与设置改为分隔线行式，选择只留一根细线',
+    '主页次级入口并为一行，设置入口移至底部'
+  ]},
+  { v: '1.4.1', name: '更新日志', items: [
+    '设置页新增「更新日志」入口，按版本倒序展示每次改动',
+    '版本号从 1.4.1 起，后续按 1.4.1 → 1.4.2 依次叠加'
+  ]},
+  { v: '1.4', name: '界面视觉重做', items: [
+    '统一暗色玻璃面板、发丝描边与字号、圆角规范',
+    'HUD 重排：大号分数、三段生命、燃料细条、货币合并芯片',
+    '主页改为全屏暗幕版式，难度与设置改为列表式单选',
+    '暂停、结算、商店、装扮、地图统一按钮层级与选中态'
+  ]},
+  { v: '1.3', name: '燃料喷气', items: [
+    '翅膀改为燃料喷气：一箱 4.2 秒，点按托举额外耗油',
+    '松手滑翔下沉，贴地自动收翅膀，耗尽仍保留一次空中跳',
+    '飞行中金币改刷在高空，HUD 显示燃料余量'
+  ]},
+  { v: '1.2', name: '手感与公平性', items: [
+    '加入土狼时间、跳跃缓冲、压扁拉伸、震屏与顿帧',
+    '障碍改为距离制生成，并按滞空距离保证最小可解间距',
+    '金币改弧形串；存档节流合并写入，切后台自动暂停'
+  ]},
+  { v: '1.1.1', name: '修复穿模', items: [
+    '调整牛仔帽的帽冠、帽檐与帽带位置，消除与头部穿模'
+  ]},
+  { v: '1.1', name: '雪天地图与性能', items: [
+    '雪天地图：积雪描边、落地脚印、寒风音效',
+    '降低渲染分辨率上限，缓存雪花颜色与 HUD 渐变'
+  ]},
+  { v: '1.0', name: '初版', items: [
+    '跑酷核心玩法、金币与钻石、10 钻复活、兑换码',
+    '皮肤、帽子、多地图与商店'
+  ]}
+];
+const pauseBtn = { x: 0, y: 0, r: 19 };   // 右上角暂停按钮命中区
+const resumeBtn = { x: 0, y: 0, w: 150, h: 40 }; // 暂停卡片：继续
+const restartBtn = { x: 0, y: 0, w: 150, h: 40 }; // 暂停卡片：重开
+const pauseHomeBtn = { x: 0, y: 0, w: 150, h: 40 }; // 暂停卡片：返回主页
+const deadRestartBtn = { x: 0, y: 0, w: 120, h: 42 }; // 结束卡片：重新开始
+const deadHomeBtn = { x: 0, y: 0, w: 120, h: 42 };   // 结束卡片：返回主页
+const reviveBtn = { x: 0, y: 0, w: 240, h: 42 };      // 结束卡片：钻石复活
+const startBtn = { x: 0, y: 0, w: 200, h: 46 };      // 主页：开始游戏主按钮
+const diffBtns = [];                                  // 难度弹窗：三档（DIFFS 定义后填充）
+const diffBackBtn = { x: 0, y: 0, w: 150, h: 38 };  // 难度弹窗：返回主页
+const skinBtn = { x: 0, y: 0, w: 104, h: 38 };       // 主页：皮肤页入口
+const mapBtn = { x: 0, y: 0, w: 104, h: 38 };         // 主页：地图页入口
+const shopBtn = { x: 0, y: 0, w: 104, h: 38 };       // 主页：商店入口
+const gearBtn = { x: 0, y: 0, w: 36, h: 36 };        // 主页右下角：设置齿轮
+const settingsBackBtn = { x: 0, y: 0, w: 150, h: 38 }; // 设置页：返回主页
+const redeemBtn = { x: 0, y: 0, w: 200, h: 40 };     // 设置页：兑换码
+const logBtn = { x: 0, y: 0, w: 200, h: 40 };        // 设置页：更新日志
+const logBackBtn = { x: 0, y: 0, w: 180, h: 38 };    // 更新日志页：返回设置
+const codeField = { x: 0, y: 0, w: 270, h: 44 };      // 兑换码输入框（对齐隐藏 input）
+const redeemConfirmBtn = { x: 0, y: 0, w: 120, h: 38 }; // 面板：确认
+const redeemCancelBtn = { x: 0, y: 0, w: 120, h: 38 };  // 面板：取消
+const skinBackBtn = { x: 0, y: 0, w: 150, h: 38 };   // 皮肤页：返回主页
+const mapBackBtn = { x: 0, y: 0, w: 150, h: 38 };    // 地图页：返回主页
+const shopBackBtn = { x: 0, y: 0, w: 150, h: 40 };   // 商店：返回主页
+const buyBtn = { x: 0, y: 0, w: 116, h: 38 };        // 商店：购买商品
+const skinSlots = []; // 皮肤页卡片命中区域 {x,y,w,h,index}
+const mapSlots = [];  // 地图页卡片命中区域 {x,y,w,h,index}
+// —— 面板网格纵向滚动 ——
+const COLS = 3;                 // 每行卡片数
+let skinsScroll = 0;            // 皮肤页滚动偏移（内容坐标）
+let mapsScroll = 0;            // 地图页滚动偏移
+let logScroll = 0;             // 更新日志页滚动偏移
+let drag = null;               // 进行中的拖拽 {panel, startY, startScroll, moved}
+let skinsView = { top: 0, h: 0, contentH: 0 }; // 皮肤页可视/内容尺寸，供滚动边界 clamp
+let mapsView = { top: 0, h: 0, contentH: 0 };   // 地图页可视/内容尺寸
+let logView = { top: 0, h: 0, contentH: 0 };    // 更新日志页可视/内容尺寸
+const clampScroll = (v, max) => Math.max(0, Math.min(max, v));
+let pressedBtn = null;  // 当前按下的矩形按钮 {ref, act}（按下反馈用）
+let pressedPause = false; // 暂停钮按下态
+let pressedDot = -1;   // 按下的皮肤圆点 index
+let score = 0;
+let coinScore = 0;    // 金币奖励分（独立累计，避免被距离分覆盖）
+let diamondCount = 0; // 本局已拾取钻石数量（HUD 计数）
+let totalCoins = 0;   // 累计持有金币（跨局持久货币，用于后续购买皮肤/道具）
+try { totalCoins = Number(localStorage.getItem('runner_total_coins')) || 0; } catch (e) {}
+let totalDiamonds = 0; // 累计持有钻石（跨局持久，用于兑换复活）
+try { totalDiamonds = Number(localStorage.getItem('runner_total_diamonds')) || 0; } catch (e) {}
+const REVIVE_COST = 10; // 一次复活消耗的钻石数
+let revivedThisRun = false; // 本局是否已复活过（每局限一次）
+let best = 0;
+try { best = Number(localStorage.getItem('runner_best')) || 0; } catch (e) {}
+let speed = 360;       // 当前滚动速度 px/s
+let distance = 0;
+let spawnTimer = 0;
+let spawnDist = 0;     // 距下一个障碍还需滚动的像素（改用距离制生成，高速时不会挤成必死连招）
+let coinTimer = 0;
+let jumpHeld = false;  // 跳跃按键边沿判断，防止长按连跳
+let combo = 0;        // 连续吃金币数（连击）
+let comboTimer = 0;   // 连击剩余有效时间
+let lastMilestone = 0; // 已播报的分数里程碑（每 100 分一档）
+let emote = 'idle';       // 临时情绪表情: idle | happy | excited | wow | hurt | dead
+let emoteTimer = 0;       // 临时表情剩余时长（超时回 idle）
+let rainbowFlash = 0;     // 彩虹币拾取后的流光剩余时长
+let diamondFlash = 0;    // 钻石拾取后的蓝色流光剩余时长
+function setEmote(name, dur) { emote = name; emoteTimer = dur; }
+let blinkTimer = 2.5;     // 距下次眨眼倒计时
+let blinkHold = 0;         // 当前闭眼持续时长
+let blinkOn = false;      // 是否处于闭眼帧
+const COMBO_WINDOW = 2;   // 连击有效秒数
+const COMBO_MAX = 5;     // 倍率上限
+const MAX_LIVES = 3;      // 生命条数
+let lives = MAX_LIVES;    // 当前剩余生命
+let invuln = 0;           // 受击后无敌剩余秒数
+const INVULN_DUR = 1.5;   // 无敌时长（秒）
+
+// —— 手感容错（跑酷类最关键的两个宽容窗口）——
+const COYOTE_TIME = 0.09;  // 土狼时间：刚离地 90ms 内仍允许一段跳
+const JUMP_BUFFER = 0.14;  // 跳跃缓冲：落地前 140ms 按跳，落地瞬间自动起跳
+let coyoteTimer = 0;       // 土狼时间剩余
+let jumpBufferTimer = 0;   // 跳跃缓冲剩余
+// —— 打击反馈 ——
+let squash = 0;            // 形变：正=落地压扁，负=起跳拉伸，向 0 收敛
+let shake = 0;             // 屏幕震动幅度（px），逐步衰减
+let hitStop = 0;           // 顿帧剩余秒数：命中瞬间冻结世界，增强打击感
+let dust = [];             // 落地扬尘粒子
+let popups = [];           // 拾取飘字（+1 / +钻石）
+
+// ---------- 翅膀飞行 ----------
+const FLY_NEED = 1000;    // 集齐多少分解锁一次翅膀
+// 燃料喷气：翅膀不再是一段固定时长，而是一箱燃料，由玩家自己决定怎么烧
+const FLY_FUEL_MAX = 4.2; // 燃料上限（秒）：一路滑翔约 4 秒，狂点托举会更短
+const FLY_TAP_COST = 0.22;// 每次托举额外消耗的燃料（秒）
+const FLY_LIFT = -320;    // 飞行中按跳跃的托举力度
+const FLY_MIN_Y = 150;    // 飞行高度上限（离地天花板）
+let flyNextAt = FLY_NEED; // 下一次解锁翅膀所需分数
+let flyTimer = 0;         // 剩余燃料（秒，0 表示未在飞行）
+
+// ---------- 限时道具（磁铁 / 护盾 / 冲刺） ----------
+const MAGNET_DUR = 6;       // 磁铁持续秒数：自动吸附附近金币 / 钻石
+const SHIELD_DUR = 10;      // 护盾持续秒数：期间抵挡一次伤害
+const DASH_DUR = 3;         // 冲刺持续秒数：无敌并撞碎障碍
+const MAGNET_RADIUS = 190;  // 磁铁吸附水平半径
+let magnetTimer = 0;         // 磁铁剩余时间（0 表示未激活）
+let shieldOn = false;        // 护盾是否激活
+let shieldTimer = 0;         // 护盾剩余时间
+let dashTimer = 0;           // 冲刺剩余时间（0 表示未激活）
+let powerups = [];           // 场上可拾取道具 {x,y,r,type,spin,collected}
+let powerupTimer = 5;        // 下一个道具刷新倒计时
+
+// ---------- 难度 ----------
+const DIFFS = [
+  { key: 'easy',   name: '简单', base: 300, accel: 5, max: 600, gapMul: 1.35, gapMin: 1.0,  desc: '障碍稀少，慢速起步' },
+  { key: 'normal', name: '普通', base: 385, accel: 7, max: 760, gapMul: 0.92, gapMin: 0.8,  desc: '标准节奏，障碍正常' },
+  { key: 'hard',   name: '困难', base: 495, accel: 11, max: 960, gapMul: 0.56, gapMin: 0.58, desc: '障碍密集，高速挑战' }
+];
+let difficulty = 1; // 默认普通
+try { difficulty = Math.max(0, Math.min(DIFFS.length - 1, Number(localStorage.getItem('runner_diff')) || 1)); } catch (e) {}
+function persistDiff() { try { localStorage.setItem('runner_diff', String(difficulty)); } catch (e) {} }
+function curDiff() { return DIFFS[difficulty]; }
+DIFFS.forEach(() => diffBtns.push({ x: 0, y: 0, w: 240, h: 52 }));
+
+// ---------- 玩家 ----------
+const player = {
+  x: 70, y: GROUND_Y, w: 34, h: 52,
+  vy: 0, onGround: true,
+  jumps: 0,           // 已用跳跃次数（0 地面 / 1 一段 / 2 二段）
+  runFrame: 0
+};
+
+// ---------- 皮肤（前两套免费，第三套商店付费） ----------
+const skins = [
+  { id: 'white', name: '云白', body: '#e8eaed', head: '#f5f6f7', shoe: '#3a4149', accent: '#d96c5f', price: 0 }, // 白色
+  { id: 'black', name: '墨黑', body: '#2b2f36', head: '#454c55', shoe: '#14161a', accent: '#f2c14e', price: 0 }, // 黑色
+  { id: 'green', name: '翠绿', body: '#2f5d43', head: '#3f7a57', shoe: '#14161a', accent: '#7fd6a0', price: 20 },  // 商店付费：绿色皮肤
+  { id: 'camo', name: '迷彩', body: '#59614a', head: '#6a7256', shoe: '#2c3126', accent: '#8a7a4a', price: 888, camo: true, camo1: '#434a36', camo2: '#7d7457' } // 高价：迷彩皮肤
+];
+let skinIndex = 0;
+const skinDots = []; // 记录圆点命中区域
+let owned = [];      // 已拥有的皮肤 id（免费皮肤天然拥有，付费皮肤购买后写入）
+try { owned = JSON.parse(localStorage.getItem('runner_owned')) || []; } catch (e) { owned = []; }
+
+// ---------- 地图（黑夜 / 白天免费，雨天 100 金币兑换） ----------
+const MAPS = [
+  { id: 'night', name: '黑夜', day: false, price: 0,
+    sky: ['#28303a', '#37404a', '#1e2329'], ground: ['#454e57', '#252a30'],
+    hill: 'rgba(255,255,255,.06)', cloud: 'rgba(255,255,255,.10)',
+    groundTop: '#5a6570', tick: 'rgba(255,255,255,.07)' },
+  { id: 'day', name: '白天', day: true, price: 0,
+    sky: ['#6ec3f0', '#bfe6f7', '#eef9ff'], ground: ['#7fb96a', '#57944a'],
+    hill: 'rgba(255,255,255,.30)', cloud: 'rgba(255,255,255,.9)',
+    groundTop: '#6aa857', tick: 'rgba(255,255,255,.20)' },
+  { id: 'rain', name: '雨天', day: false, rain: true, price: 100,
+    sky: ['#56616e', '#78848f', '#97a2ab'], ground: ['#46524c', '#2f3733'],
+    hill: 'rgba(255,255,255,.12)', cloud: 'rgba(80,90,100,.75)',
+    groundTop: '#5c6862', tick: 'rgba(255,255,255,.12)' },
+  { id: 'snow', name: '雪天', day: false, snow: true, price: 188,
+    sky: ['#9db4c7', '#c3d4e0', '#e6eef3'], ground: ['#d7e2ea', '#b9cbd8'],
+    hill: 'rgba(255,255,255,.35)', cloud: 'rgba(255,255,255,.85)',
+    groundTop: '#eef4f8', tick: 'rgba(120,150,170,.25)' }
+];
+let mapIndex = 0;
+try { mapIndex = Number(localStorage.getItem('runner_map')) || 0; } catch (e) {}
+if (mapIndex < 0 || mapIndex >= MAPS.length) mapIndex = 0;
+function persistMap() { try { localStorage.setItem('runner_map', String(mapIndex)); } catch (e) {} }
+
+// 已兑换的付费地图 id（免费地图天然拥有）
+let ownedMaps = [];
+try { ownedMaps = JSON.parse(localStorage.getItem('runner_maps')) || []; } catch (e) { ownedMaps = []; }
+function isMapOwned(i) {
+  const m = MAPS[i];
+  return !!m && (m.price === 0 || ownedMaps.indexOf(m.id) >= 0);
+}
+function persistOwnedMaps() { try { localStorage.setItem('runner_maps', JSON.stringify(ownedMaps)); } catch (e) {} }
+// 兜底：当前选中地图若未拥有（存档异常 / 付费地图被移除），回退到第一个已拥有地图
+if (!isMapOwned(mapIndex)) {
+  mapIndex = MAPS.findIndex((m, i) => isMapOwned(i));
+  if (mapIndex < 0) mapIndex = 0;
+  persistMap();
+}
+// 兜底：当前选中皮肤若未拥有（存档异常），回退到第一个已拥有皮肤
+if (!isOwned(skinIndex)) {
+  skinIndex = skins.findIndex((s, i) => isOwned(i));
+  if (skinIndex < 0) skinIndex = 0;
+}
+
+function isOwned(i) {
+  const s = skins[i];
+  return !!s && (s.price === 0 || owned.indexOf(s.id) >= 0);
+}
+function persistCoins() { try { localStorage.setItem('runner_total_coins', totalCoins); } catch (e) {} }
+function persistDiamonds() { try { localStorage.setItem('runner_total_diamonds', totalDiamonds); } catch (e) {} }
+function persistOwned() { try { localStorage.setItem('runner_owned', JSON.stringify(owned)); } catch (e) {} }
+
+// 存档节流：拾取时只置脏标记，最多每 0.8 秒合并写一次，避免每枚金币同步写 localStorage 卡帧
+let saveDirty = false;
+let saveCooldown = 0.8;
+function markSave() { saveDirty = true; }
+function flushSave() {
+  if (!saveDirty) return;
+  saveDirty = false;
+  persistCoins();
+  persistDiamonds();
+}
+
+// 复活：每局限一次，钻石足够才可复活
+function canRevive() { return !revivedThisRun && totalDiamonds >= REVIVE_COST; }
+function doRevive() {
+  totalDiamonds -= REVIVE_COST;
+  persistDiamonds();
+  revivedThisRun = true;
+  lives = MAX_LIVES;
+  invuln = INVULN_DUR + 1;
+  // 清掉玩家身前一段距离内的障碍，避免复活落地即撞上
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    if (obstacles[i].x < player.x + 180) obstacles.splice(i, 1);
+  }
+  player.y = GROUND_Y;
+  player.vy = 0;
+  player.onGround = true;
+  player.jumps = 0;
+  flyTimer = 0;
+  magnetTimer = 0;
+  shieldOn = false;
+  shieldTimer = 0;
+  dashTimer = 0;
+  emote = 'idle';
+  emoteTimer = 0;
+  state = 'playing';
+  sfx.revive();
+}
+
+// ---------- 帽子（成就解锁：达到指定历史最高分即可佩戴，不可金币购买） ----------
+const HATS = [
+  { id: 'none', name: '默认', reqScore: 0 },
+  { id: 'cowboy', name: '牛仔帽', reqScore: 500, brim: '#6b4626', crown: '#8a5f3a', band: '#2f2117' }
+];
+let hatIndex = 0;
+try { hatIndex = Number(localStorage.getItem('runner_hat')) || 0; } catch (e) { hatIndex = 0; }
+const hatSlots = []; // 皮肤页帽子卡片命中区域
+function isHatUnlocked(i) {
+  const h = HATS[i];
+  return !!h && (h.reqScore === 0 || best >= h.reqScore);
+}
+function persistHat() { try { localStorage.setItem('runner_hat', String(hatIndex)); } catch (e) {} }
+// 兜底：当前帽子若未解锁（存档异常 / 条件未达成），回退默认帽
+if (!isHatUnlocked(hatIndex)) { hatIndex = 0; persistHat(); }
+
+// ---------- 兑换码（防重复兑换；奖励分金币 coin / 钻石 diamond） ----------
+const REDEEM_CODES = {
+  JUMP2026: { type: 'coin', amount: 50 },
+  HELLO20: { type: 'coin', amount: 20 },
+  '杨海鑫是神': { type: 'coin', amount: 1000 },
+  '内测专属钻石': { type: 'diamond', amount: 1000 }
+};
+let redeemedCodes = [];
+try { redeemedCodes = JSON.parse(localStorage.getItem('runner_redeemed')) || []; } catch (e) { redeemedCodes = []; }
+function persistRedeemed() { try { localStorage.setItem('runner_redeemed', JSON.stringify(redeemedCodes)); } catch (e) {} }
+let redeemMsg = ''; // 设置页最近一次兑换结果提示
+function redeemCode(raw) {
+  const code = String(raw == null ? '' : raw).trim().toUpperCase();
+  if (!code) { redeemMsg = '请输入兑换码'; sfx.redeemFail(); return { ok: false, msg: redeemMsg }; }
+  if (redeemedCodes.indexOf(code) >= 0) { redeemMsg = '该兑换码已使用'; sfx.redeemFail(); return { ok: false, msg: redeemMsg }; }
+  if (!(code in REDEEM_CODES)) { redeemMsg = '兑换码无效'; sfx.redeemFail(); return { ok: false, msg: redeemMsg }; }
+  const reward = REDEEM_CODES[code];
+  if (reward.type === 'diamond') {
+    totalDiamonds += reward.amount;
+    persistDiamonds();
+    redeemMsg = '成功获得 ' + reward.amount + ' 钻石';
+  } else {
+    totalCoins += reward.amount;
+    persistCoins();
+    redeemMsg = '成功获得 ' + reward.amount + ' 金币';
+  }
+  redeemedCodes.push(code);
+  persistRedeemed();
+  sfx.unlock();
+  return { ok: true, msg: redeemMsg };
+}
+
+// 兑换码面板：自绘浮层 + 真实透明 input 覆盖在输入框上，直接接收软键盘输入
+let redeemOpen = false;
+let redeemDraft = '';
+codeInput.addEventListener('input', () => { redeemDraft = codeInput.value; });
+codeInput.addEventListener('click', () => { codeInput.focus({ preventScroll: true }); });
+function placeCodeInput() {
+  // input 对齐到 canvas 输入框（逻辑坐标 → 容器百分比），撑开成可聚焦尺寸
+  codeInput.style.left = (codeField.x / W * 100) + '%';
+  codeInput.style.top = (codeField.y / H * 100) + '%';
+  codeInput.style.width = (codeField.w / W * 100) + '%';
+  codeInput.style.height = (codeField.h / H * 100) + '%';
+}
+function openRedeemPanel() {
+  redeemOpen = true;
+  redeemDraft = codeInput.value = '';
+  // 按面板固定几何先把输入框撑开定位，避免首次打开时仍是 1px 元素导致无法聚焦
+  const ph = 210, py = H / 2 - ph / 2;
+  codeField.w = 270; codeField.h = 44;
+  codeField.x = W / 2 - 135; codeField.y = py + 62;
+  placeCodeInput();
+  // 在用户手势内同步聚焦；部分 webview 需要可见、可点、有尺寸的输入框才会唤起键盘
+  codeInput.focus({ preventScroll: true });
+  requestAnimationFrame(() => codeInput.focus({ preventScroll: true }));
+}
+function closeRedeemPanel() {
+  redeemOpen = false;
+  codeInput.value = '';
+  redeemDraft = '';
+  codeInput.blur();
+  codeInput.style.width = '1px';
+  codeInput.style.height = '1px';
+}
+function submitRedeem() {
+  redeemCode(codeInput.value);
+  closeRedeemPanel();
+}
+
+// 商店售卖的绿色皮肤在 skins 中的下标
+const SHOP_SKIN_INDEX = 2;
+let shopSkinIndex = SHOP_SKIN_INDEX; // 商店当前展示的付费皮肤（从皮肤页跳转时指定）
+function buySkin(i) {
+  const s = skins[i];
+  if (!s || isOwned(i)) return;
+  if (totalCoins < s.price) return; // 金币不足：按钮置灰，不扣款
+  totalCoins -= s.price;
+  owned.push(s.id);
+  skinIndex = i; // 购买后自动装备
+  persistCoins();
+  persistOwned();
+  sfx.unlock();
+}
+function buyMap(i) {
+  const m = MAPS[i];
+  if (!m || isMapOwned(i)) return;
+  if (totalCoins < m.price) return; // 金币不足：不扣款
+  totalCoins -= m.price;
+  ownedMaps.push(m.id);
+  mapIndex = i; // 兑换后自动装备
+  persistCoins();
+  persistOwnedMaps();
+  persistMap();
+  sfx.unlock();
+}
+
+// ---------- 音效（Web Audio 合成，无外部素材） ----------
+let audioCtx = null;
+function warmUp() {
+  // 首次手势里播放一个近静音短音，预热音频管线，避免第一声延迟
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  g.gain.value = 0.0001;
+  osc.connect(g).connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + 0.03);
+}
+function ensureAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+    warmUp();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume().catch(() => {});
+  }
+}
+function tone(freq, dur, type = 'square', vol = 0.15, slideTo = null, delay = 0) {
+  // 兜底：上下文尚未初始化时（手势入口遗漏 / WebView 冷启动）在此尝试创建
+  if (!audioCtx) ensureAudio();
+  if (!audioCtx) return;
+  // 上下文未解锁时再次唤醒；不要直接丢弃，否则挂起期间的音效会全程失声
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  const t0 = audioCtx.currentTime + delay;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t0);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+  gain.gain.setValueAtTime(vol, t0);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.02);
+}
+const sfx = {
+  jump() { tone(300, 0.1, 'square', 0.12, 580); },
+  doubleJump() { tone(420, 0.11, 'square', 0.11, 780); },
+  coin() { tone(880, 0.07, 'triangle', 0.15); tone(1320, 0.09, 'triangle', 0.15, null, 0.07); },
+  hurt() { tone(220, 0.15, 'sawtooth', 0.14, 90); },
+  die()  { tone(300, 0.3, 'sawtooth', 0.16, 70); },
+  // 通用 UI 轻音
+  click() { tone(600, 0.05, 'triangle', 0.08); },
+  start() { tone(440, 0.09, 'square', 0.12); tone(660, 0.12, 'square', 0.12, null, 0.09); },
+  pause() { tone(500, 0.1, 'triangle', 0.1, 260); },
+  resume() { tone(300, 0.1, 'triangle', 0.1, 520); },
+  back() { tone(400, 0.07, 'triangle', 0.08, 260); },
+  // 解锁 / 兑换成功琶音
+  unlock() { tone(660, 0.08, 'triangle', 0.14); tone(880, 0.08, 'triangle', 0.14, null, 0.08); tone(1100, 0.12, 'triangle', 0.14, null, 0.16); },
+  redeemFail() { tone(220, 0.12, 'sawtooth', 0.1, 160); tone(160, 0.14, 'sawtooth', 0.09, 120, 0.1); },
+  land() { tone(180, 0.05, 'sine', 0.07, 120); },
+  spring() { tone(260, 0.16, 'triangle', 0.14, 720); },
+  // 翅膀展开：上扬琶音；飞行结束轻落音
+  wings() { tone(520, 0.1, 'triangle', 0.14, 880); tone(780, 0.1, 'triangle', 0.14, null, 0.09); tone(1040, 0.18, 'triangle', 0.15, null, 0.18); },
+  flyEnd() { tone(620, 0.12, 'sine', 0.1, 260); },
+  revive() { tone(392, 0.12, 'triangle', 0.15, 587); tone(587, 0.12, 'triangle', 0.15, 784, 0.1); tone(784, 0.22, 'triangle', 0.16, null, 0.2); },
+  rainbow() { tone(660, 0.08, 'sine', 0.14); tone(880, 0.08, 'sine', 0.14, null, 0.07); tone(1100, 0.08, 'sine', 0.14, null, 0.14); tone(1320, 0.14, 'sine', 0.15, null, 0.21); },
+  diamond() { tone(1180, 0.07, 'sine', 0.15); tone(1760, 0.16, 'sine', 0.15, null, 0.08); },
+  combo(n) { tone(520 + Math.min(n, 10) * 40, 0.06, 'triangle', 0.1); },
+  // 空跳 / 不可操作的低沉拒绝音
+  deny() { tone(160, 0.08, 'square', 0.08, 120); },
+  // 破纪录上行号角
+  record() { tone(523, 0.1, 'triangle', 0.15); tone(659, 0.1, 'triangle', 0.15, null, 0.1); tone(784, 0.1, 'triangle', 0.15, null, 0.2); tone(1047, 0.18, 'triangle', 0.16, null, 0.3); },
+  // 分数里程碑上扬双音
+  milestone() { tone(700, 0.07, 'triangle', 0.12); tone(1000, 0.1, 'triangle', 0.12, null, 0.07); },
+  // 残血警示两短音
+  warning() { tone(330, 0.09, 'sawtooth', 0.1); tone(330, 0.09, 'sawtooth', 0.1, null, 0.12); },
+  // 进入子页面轻音
+  pageIn() { tone(500, 0.06, 'triangle', 0.09, 700); },
+  // 连击中断低音
+  comboBreak() { tone(300, 0.1, 'sine', 0.08, 150); },
+  // 限时道具：磁铁上扬 / 护盾温润 / 冲刺疾驰 / 护盾破碎
+  magnet() { tone(520, 0.1, 'sine', 0.13, 780); tone(780, 0.14, 'sine', 0.13, 1040, 0.09); },
+  shield() { tone(340, 0.12, 'triangle', 0.14, 520); tone(520, 0.16, 'triangle', 0.13, 640, 0.1); },
+  dash() { tone(700, 0.1, 'sawtooth', 0.11, 1100); tone(900, 0.12, 'sawtooth', 0.1, 1300, 0.08); },
+  powerBreak() { tone(200, 0.12, 'square', 0.12, 120); }
+};
+
+// ---------- 持续环境声：雪天寒风（循环噪声 + 低通 + 缓慢起伏，可启停） ----------
+const wind = {
+  source: null, filter: null, gain: null, lfo: null, lfoGain: null, on: false,
+  start() {
+    if (this.on) return;
+    ensureAudio();
+    if (!audioCtx) return;
+    // 2 秒循环棕噪声，偏暖、不刺耳
+    const len = Math.floor(audioCtx.sampleRate * 2);
+    const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < len; i++) {
+      const white = Math.random() * 2 - 1;
+      last = (last + 0.02 * white) / 1.02;
+      data[i] = last * 3.2;
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 460;
+    filter.Q.value = 0.5;
+    const gain = audioCtx.createGain();
+    gain.gain.value = 0;
+    gain.gain.setTargetAtTime(0.055, audioCtx.currentTime, 0.8);
+    // 缓慢起伏的 LFO，让风声一阵一阵
+    const lfo = audioCtx.createOscillator();
+    lfo.frequency.value = 0.16;
+    const lfoGain = audioCtx.createGain();
+    lfoGain.gain.value = 0.018;
+    lfo.connect(lfoGain);
+    lfoGain.connect(gain.gain);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(audioCtx.destination);
+    src.start();
+    lfo.start();
+    this.source = src; this.filter = filter; this.gain = gain;
+    this.lfo = lfo; this.lfoGain = lfoGain; this.on = true;
+  },
+  stop() {
+    if (!this.on || !audioCtx) { this.on = false; return; }
+    this.on = false;
+    const t = audioCtx.currentTime;
+    try { this.gain.gain.setTargetAtTime(0, t, 0.25); } catch (e) {}
+    const src = this.source, lfo = this.lfo;
+    setTimeout(() => {
+      try { src && src.stop(); } catch (e) {}
+      try { lfo && lfo.stop(); } catch (e) {}
+    }, 600);
+    this.source = null; this.filter = null; this.gain = null;
+    this.lfo = null; this.lfoGain = null;
+  },
+  // 按当前地图 / 对局状态同步：仅雪天且对局进行中才响起
+  sync(active) {
+    if (active) this.start(); else this.stop();
+  }
+};
+
+// ---------- 世界元素 ----------
+let obstacles = [];  // 障碍物
+let coins = [];      // 金币
+let pads = [];       // 弹跳板（增益机关，不造成伤害）
+let padTimer = 0;    // 下一块弹跳板倒计时
+let clouds = [];     // 远景云
+let hills = [];      // 远景山丘
+let rains = [];     // 雨天雨丝
+let snows = [];     // 雪天雪花
+let footprints = []; // 雪天落地脚印（渐隐）
+const pBox = { x: 0, y: 0, w: 0, h: 0 }; // 玩家碰撞盒（复用，避免每帧分配）
+const coinBox = { x: 0, y: 0, w: 0, h: 0 }; // 金币碰撞盒（复用）
+
+function initScenery() {
+  clouds = [
+    { x: 80, y: 110, s: 1.0 },
+    { x: 240, y: 180, s: 0.7 },
+    { x: 340, y: 80, s: 0.85 }
+  ];
+  hills = [
+    { x: -40, w: 220, h: 110 },
+    { x: 180, w: 240, h: 150 },
+    { x: 420, w: 220, h: 100 }
+  ];
+  rains = [];
+  for (let k = 0; k < 28; k++) {
+    rains.push({ x: Math.random() * W, y: Math.random() * GROUND_Y, len: 12 + Math.random() * 10, spd: 260 + Math.random() * 120 });
+  }
+  snows = [];
+  for (let k = 0; k < 34; k++) {
+    const alpha = 0.45 + Math.random() * 0.5;
+    snows.push({
+      x: Math.random() * W, y: Math.random() * GROUND_Y,
+      r: 1.5 + Math.random() * 2.2, spd: 34 + Math.random() * 40,
+      drift: 14 + Math.random() * 22, phase: Math.random() * Math.PI * 2,
+      alpha, color: 'rgba(255,255,255,' + alpha.toFixed(2) + ')'
+    });
+  }
+}
+
+// 落地脚印：左右脚交替，记录在雪地地面，随后随世界滚动并渐隐
+function addFootprint() {
+  const side = footprints.length % 2 === 0 ? -1 : 1;
+  footprints.push({
+    x: player.x + player.w / 2 + side * 5,
+    y: GROUND_Y + 11,
+    side,
+    life: 1.6,
+    maxLife: 1.6
+  });
+  if (footprints.length > 24) footprints.shift();
+}
+
+// ---------- 工具 ----------
+function reset() {
+  state = 'ready';
+  score = 0;
+  coinScore = 0;
+  diamondCount = 0;
+  combo = 0;
+  comboTimer = 0;
+  lastMilestone = 0;
+  lives = MAX_LIVES;
+  invuln = 0;
+  revivedThisRun = false;
+  flyTimer = 0;
+  flyNextAt = FLY_NEED;
+  magnetTimer = 0;
+  shieldOn = false;
+  shieldTimer = 0;
+  dashTimer = 0;
+  powerups = [];
+  powerupTimer = 5;
+  coyoteTimer = 0;
+  jumpBufferTimer = 0;
+  squash = 0;
+  shake = 0;
+  hitStop = 0;
+  dust = [];
+  popups = [];
+  emote = 'idle';
+  emoteTimer = 0;
+  blinkTimer = 2.5;
+  blinkHold = 0;
+  blinkOn = false;
+  rainbowFlash = 0;
+  diamondFlash = 0;
+  speed = curDiff().base;
+  distance = 0;
+  spawnTimer = 0.8 * curDiff().gapMul;
+  spawnDist = 420;   // 开局先给一段无障碍的安全跑道
+  coinTimer = 1.4;
+  obstacles = [];
+  coins = [];
+  pads = [];
+  footprints = [];
+  padTimer = 4;
+  player.y = GROUND_Y;
+  player.vy = 0;
+  player.onGround = true;
+  player.jumps = 0;
+  jumpHeld = false;
+  pressedBtn = null;
+  pressedPause = false;
+  pressedDot = -1;
+  readyTime = 0;
+  initScenery();
+}
+
+function startGame() {
+  state = 'playing';
+  sfx.start();
+}
+
+function pauseGame() {
+  if (state === 'playing') {
+    state = 'paused';
+    pressedPause = false;
+    pressedBtn = null;
+    hitStop = 0;
+    flushSave();
+    sfx.pause();
+  }
+}
+
+function resumeGame() {
+  if (state === 'paused') {
+    state = 'playing';
+    pressedBtn = null;
+    sfx.resume();
+  }
+}
+
+function jump() {
+  // 仅在对局中响应跳跃；主页 / 暂停 / 结束 / 商店均由对应按钮驱动，避免误触开局
+  if (state !== 'playing') return;
+  // 飞行中：按跳跃向上托举，松开后滑翔下沉
+  if (flyTimer > 0) {
+    // 燃料喷气：每次托举额外烧一点燃料——点得越猛爬得越高，但飞得越短
+    player.vy = FLY_LIFT;
+    player.onGround = false;
+    flyTimer -= FLY_TAP_COST;
+    sfx.jump();
+    return;
+  }
+  // 一段跳：在地面，或刚离地的土狼窗口内
+  if (player.onGround || coyoteTimer > 0) {
+    player.vy = JUMP_V;
+    player.onGround = false;
+    player.jumps = 1;
+    coyoteTimer = 0;      // 用掉土狼时间，防止二次白嫖
+    jumpBufferTimer = 0;
+    squash = -0.55;       // 起跳拉伸
+    sfx.jump();
+  }
+  // 二段跳：空中还能再跳一次，力度略弱
+  else if (player.jumps < 2) {
+    player.vy = JUMP_V * 0.9;
+    player.jumps = 2;
+    squash = -0.4;
+    setEmote('wow', 0.4);
+    sfx.doubleJump();
+  }
+  // 已无跳跃次数：记录一次缓冲，落地瞬间自动起跳；同时给拒绝音提示
+  else {
+    jumpBufferTimer = JUMP_BUFFER;
+    sfx.deny();
+  }
+}
+
+// 输入：键盘 + 触屏（边沿触发，长按不会重复跳跃）
+document.addEventListener('keydown', e => {
+  // 兑换码面板打开：回车确认 / Esc 取消，且不触发游戏跳跃
+  if (state === 'log' && e.code === 'Escape') { e.preventDefault(); state = 'settings'; return; }
+  if (redeemOpen) {
+    if (e.code === 'Enter') { e.preventDefault(); submitRedeem(); }
+    else if (e.code === 'Escape') { e.preventDefault(); closeRedeemPanel(); }
+    return;
+  }
+  if (e.code === 'KeyP' || e.code === 'Escape') {
+    if (state === 'playing') pauseGame();
+    else if (state === 'paused') resumeGame();
+    return;
+  }
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+    e.preventDefault();
+    ensureAudio();
+    if (!jumpHeld) {
+      jumpHeld = true;
+      jump();
+    }
+  }
+});
+document.addEventListener('keyup', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+    jumpHeld = false;
+  }
+});
+// 触屏抬起 / 中断时同样复位跳跃状态，避免卡在长按态
+function clearPress() { jumpHeld = false; pressedBtn = null; pressedPause = false; pressedDot = -1; drag = null; }
+canvas.addEventListener('pointerup', e => {
+  ensureAudio();
+  const rect = canvas.getBoundingClientRect();
+  const mx = ((e.clientX - rect.left) / rect.width) * W;
+  const my = ((e.clientY - rect.top) / rect.height) * H;
+  // 拖拽滚动过（位移超阈值）：取消本次点击，只做滚动
+  if (drag && drag.moved) { drag = null; pressedBtn = null; return; }
+  drag = null;
+  // 矩形按钮：松手时仍在按钮内才触发动作
+  if (pressedBtn) {
+    if (inRect(mx, my, pressedBtn.ref)) {
+      const act = pressedBtn.act;
+      // UI 音效：返回类用轻回落音；购买/兑换成功走专属解锁音，其余按钮用轻点击音
+      if (act === 'shopBack' || act === 'skinBack' || act === 'mapBack' || act === 'settingsBack' || act === 'logBack' || act === 'home' || act === 'diffBack') sfx.back();
+      else if (act === 'shop' || act === 'skins' || act === 'maps' || act === 'settings' || act === 'changelog' || act === 'toShop' || act === 'start') sfx.pageIn();
+      else if (act !== 'buy' && act !== 'buyMap' && act !== 'redeemConfirm' && act !== 'pickDiff' && act !== 'revive') sfx.click();
+      if (act === 'resume') resumeGame();
+      else if (act === 'revive') doRevive();
+      else if (act === 'start') state = 'diff';
+      else if (act === 'pickDiff') { difficulty = pressedBtn.index; persistDiff(); reset(); startGame(); }
+      else if (act === 'diffBack') state = 'ready';
+      else if (act === 'restart') { reset(); startGame(); }
+      else if (act === 'home') reset();
+      else if (act === 'shop') { shopSkinIndex = SHOP_SKIN_INDEX; state = 'shop'; }
+      else if (act === 'shopBack') state = 'ready';
+      else if (act === 'buy') buySkin(shopSkinIndex);
+      else if (act === 'skins') { skinsScroll = 0; state = 'skins'; }
+      else if (act === 'skinBack') state = 'ready';
+      else if (act === 'toShop') { shopSkinIndex = pressedBtn.index != null ? pressedBtn.index : SHOP_SKIN_INDEX; state = 'shop'; }
+      else if (act === 'pickSkin') skinIndex = pressedBtn.index;
+      else if (act === 'pickHat') { hatIndex = pressedBtn.index; persistHat(); }
+      else if (act === 'lockedHat') { sfx.deny(); }
+      else if (act === 'maps') { mapsScroll = 0; state = 'maps'; }
+      else if (act === 'mapBack') state = 'ready';
+      else if (act === 'pickMap') { mapIndex = pressedBtn.index; persistMap(); }
+      else if (act === 'buyMap') buyMap(pressedBtn.index);
+      else if (act === 'settings') state = 'settings';
+      else if (act === 'settingsBack') { closeRedeemPanel(); state = 'ready'; }
+      else if (act === 'redeem') { if (!redeemOpen) openRedeemPanel(); else codeInput.focus({ preventScroll: true }); }
+      else if (act === 'redeemConfirm') submitRedeem();
+      else if (act === 'redeemCancel') closeRedeemPanel();
+      else if (act === 'changelog') { logScroll = 0; state = 'log'; }
+      else if (act === 'logBack') state = 'settings';
+    }
+    pressedBtn = null;
+    return;
+  }
+  // 暂停钮
+  if (pressedPause) {
+    if (Math.hypot(mx - pauseBtn.x, my - pauseBtn.y) <= pauseBtn.r) pauseGame();
+    pressedPause = false;
+    return;
+  }
+  // 皮肤圆点
+  if (pressedDot >= 0) {
+    const d = skinDots[pressedDot];
+    if (d && isOwned(d.index) && Math.hypot(mx - d.x, my - d.y) <= d.r + 8) { skinIndex = d.index; sfx.click(); }
+    pressedDot = -1;
+    return;
+  }
+  jumpHeld = false;
+});
+canvas.addEventListener('pointercancel', clearPress);
+// 面板网格拖拽滚动：纵向位移直接映射到滚动偏移，超阈值判定为拖拽（取消点击）
+canvas.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const rect = canvas.getBoundingClientRect();
+  const my = ((e.clientY - rect.top) / rect.height) * H;
+  const dy = my - drag.startY;
+  if (Math.abs(dy) > 8) drag.moved = true;
+  const view = drag.panel === 'skins' ? skinsView : drag.panel === 'maps' ? mapsView : logView;
+  const maxScroll = Math.max(0, view.contentH - view.h);
+  const next = clampScroll(drag.startScroll - dy, maxScroll);
+  if (drag.panel === 'skins') skinsScroll = next;
+  else if (drag.panel === 'maps') mapsScroll = next;
+  else logScroll = next;
+});
+canvas.addEventListener('touchstart', e => { ensureAudio(); }, { passive: true });
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  ensureAudio();
+  const rect = canvas.getBoundingClientRect();
+  // 归一化到逻辑坐标（不能用 canvas.width，否则高分屏会多乘 DPR 导致命中偏移）
+  const mx = ((e.clientX - rect.left) / rect.width) * W;
+  const my = ((e.clientY - rect.top) / rect.height) * H;
+  // 开屏：点击跳过，直接进入开始界面
+  if (state === 'splash') { state = 'ready'; return; }
+  // 按钮类：只记录按下态，动作在 pointerup 触发，保证按下反馈可见
+  if (state === 'playing') {
+    if (Math.hypot(mx - pauseBtn.x, my - pauseBtn.y) <= pauseBtn.r) {
+      pressedPause = true;
+      return;
+    }
+  }
+  if (state === 'paused') {
+    if (inRect(mx, my, resumeBtn)) { pressedBtn = { ref: resumeBtn, act: 'resume' }; return; }
+    if (inRect(mx, my, restartBtn)) { pressedBtn = { ref: restartBtn, act: 'restart' }; return; }
+    if (inRect(mx, my, pauseHomeBtn)) { pressedBtn = { ref: pauseHomeBtn, act: 'home' }; return; }
+    return;
+  }
+  if (state === 'dead') {
+    if (canRevive() && inRect(mx, my, reviveBtn)) { pressedBtn = { ref: reviveBtn, act: 'revive' }; return; }
+    if (inRect(mx, my, deadRestartBtn)) { pressedBtn = { ref: deadRestartBtn, act: 'restart' }; return; }
+    if (inRect(mx, my, deadHomeBtn)) { pressedBtn = { ref: deadHomeBtn, act: 'home' }; return; }
+    return;
+  }
+  // 商店界面：返回主页 / 购买商品
+  if (state === 'shop') {
+    if (inRect(mx, my, shopBackBtn)) { pressedBtn = { ref: shopBackBtn, act: 'shopBack' }; return; }
+    if (inRect(mx, my, buyBtn)) { pressedBtn = { ref: buyBtn, act: 'buy' }; return; }
+    return;
+  }
+  // 皮肤选择页：返回主页 / 点选已拥有皮肤 / 未拥有跳转商店 / 点选已解锁帽子
+  if (state === 'skins') {
+    if (inRect(mx, my, skinBackBtn)) { pressedBtn = { ref: skinBackBtn, act: 'skinBack' }; return; }
+    drag = { panel: 'skins', startY: my, startScroll: skinsScroll, moved: false };
+    for (const slot of skinSlots) {
+      if (inRect(mx, my - skinsScroll, slot)) {
+        if (isOwned(slot.index)) pressedBtn = { ref: slot, act: 'pickSkin', index: slot.index };
+        else pressedBtn = { ref: slot, act: 'toShop', index: slot.index };
+        return;
+      }
+    }
+    for (const slot of hatSlots) {
+      if (inRect(mx, my - skinsScroll, slot)) {
+        if (isHatUnlocked(slot.index)) pressedBtn = { ref: slot, act: 'pickHat', index: slot.index };
+        else pressedBtn = { ref: slot, act: 'lockedHat', index: slot.index };
+        return;
+      }
+    }
+    return;
+  }
+  // 地图选择页：返回主页 / 点选已拥有地图 / 兑换付费地图 / 不足跳转商店
+  if (state === 'maps') {
+    if (inRect(mx, my, mapBackBtn)) { pressedBtn = { ref: mapBackBtn, act: 'mapBack' }; return; }
+    drag = { panel: 'maps', startY: my, startScroll: mapsScroll, moved: false };
+    for (const slot of mapSlots) {
+      if (inRect(mx, my - mapsScroll, slot)) {
+        if (isMapOwned(slot.index)) pressedBtn = { ref: slot, act: 'pickMap', index: slot.index };
+        else if (totalCoins >= MAPS[slot.index].price) pressedBtn = { ref: slot, act: 'buyMap', index: slot.index };
+        else pressedBtn = { ref: slot, act: 'toShop' };
+        return;
+      }
+    }
+    return;
+  }
+  // 设置页：面板打开时优先确认/取消；否则返回主页 / 兑换码
+  if (state === 'settings') {
+    if (redeemOpen) {
+      if (inRect(mx, my, redeemConfirmBtn)) { pressedBtn = { ref: redeemConfirmBtn, act: 'redeemConfirm' }; return; }
+      if (inRect(mx, my, redeemCancelBtn)) { pressedBtn = { ref: redeemCancelBtn, act: 'redeemCancel' }; return; }
+      return;
+    }
+    if (inRect(mx, my, settingsBackBtn)) { pressedBtn = { ref: settingsBackBtn, act: 'settingsBack' }; return; }
+    if (inRect(mx, my, redeemBtn)) {
+      pressedBtn = { ref: redeemBtn, act: 'redeem' };
+      openRedeemPanel(); // 在 pointerdown 手势同步栈内聚焦，提高键盘唤起成功率
+      return;
+    }
+    if (inRect(mx, my, logBtn)) { pressedBtn = { ref: logBtn, act: 'changelog' }; return; }
+    return;
+  }
+  // 更新日志页：返回设置，列表区支持上下拖拽滚动
+  if (state === 'log') {
+    if (inRect(mx, my, logBackBtn)) { pressedBtn = { ref: logBackBtn, act: 'logBack' }; return; }
+    drag = { panel: 'log', startY: my, startScroll: logScroll, moved: false };
+    return;
+  }
+  // 难度弹窗：返回主页 / 点选档位
+  if (state === 'diff') {
+    if (inRect(mx, my, diffBackBtn)) { pressedBtn = { ref: diffBackBtn, act: 'diffBack' }; return; }
+    for (let i = 0; i < diffBtns.length; i++) {
+      if (inRect(mx, my, diffBtns[i])) { pressedBtn = { ref: diffBtns[i], act: 'pickDiff', index: i }; return; }
+    }
+    return;
+  }
+  // ready 界面：开始主按钮 > 皮肤 > 地图 > 商店；点卡片空白不开局，避免误触
+  if (state === 'ready') {
+    if (inRect(mx, my, startBtn)) { pressedBtn = { ref: startBtn, act: 'start' }; return; }
+    if (inRect(mx, my, skinBtn)) { pressedBtn = { ref: skinBtn, act: 'skins' }; return; }
+    if (inRect(mx, my, mapBtn)) { pressedBtn = { ref: mapBtn, act: 'maps' }; return; }
+    if (inRect(mx, my, shopBtn)) { pressedBtn = { ref: shopBtn, act: 'shop' }; return; }
+    if (inRect(mx, my, gearBtn)) { pressedBtn = { ref: gearBtn, act: 'settings' }; return; }
+    return;
+  }
+  jump();
+});
+
+// ---------- 生成 ----------
+// 一次完整跳跃的滞空时间与水平距离：用来推导“玩家一定能反应过来”的障碍间距
+function jumpAirtime() { return (2 * Math.abs(JUMP_V)) / GRAVITY; }
+function minSafeGap() {
+  const airPx = jumpAirtime() * speed;          // 一跳跨越的水平像素
+  return Math.max(300 * curDiff().gapMul, airPx * 1.15);
+}
+function nextObstacleGap() {
+  return minSafeGap() + Math.random() * 140 * curDiff().gapMul;
+}
+
+function spawnObstacle() {
+  // 与弹跳板 / 限时道具抢位置时让路（同屏窗口内已有机关就跳过本次）
+  for (const p of pads) if (p.x > W - 130 && p.x < W + 190) return false;
+  for (const p of powerups) if (p.x > W - 130 && p.x < W + 190) return false;
+  // 两种障碍：矮块（必须跳）、高柱（必须早跳）
+  const type = Math.random() < 0.68 ? 'block' : 'pillar';
+  if (type === 'block') {
+    const h = 34 + Math.random() * 14;
+    obstacles.push({ x: W + 40, y: GROUND_Y - h, w: 30, h, type });
+  } else {
+    obstacles.push({ x: W + 40, y: GROUND_Y - 64, w: 26, h: 64, type });
+  }
+  return true;
+}
+
+function spawnCoinArc() {
+  // 弧形金币串：3~5 枚沿弧线排列，连击才有机会叠起来（单枚散刷几乎不可能维持 combo）
+  const n = 3 + Math.floor(Math.random() * 3);
+  const stepX = 44;
+  // 飞行中把金币串刷到高空：让“飞”也有收益，而不是单纯躲障碍
+  const flying = flyTimer > 0;
+  const baseY = flying
+    ? (FLY_MIN_Y + 30 + Math.random() * 60)
+    : (GROUND_Y - 74 - Math.random() * 26);
+  const arcH = 24 + Math.random() * 16;
+  const rates = [0.06, 0.1, 0.14];
+  const diamond = Math.random() < 0.10;                       // 稀有：整串出一枚钻石
+  const rainbow = !diamond && Math.random() < rates[difficulty];
+  const midIndex = (n - 1) / 2;
+  for (let i = 0; i < n; i++) {
+    const t = n > 1 ? i / (n - 1) : 0.5;
+    const y = baseY - Math.sin(t * Math.PI) * arcH;
+    const isMid = Math.abs(i - midIndex) < 0.6;
+    const c = {
+      x: W + 20 + i * stepX, y,
+      r: (diamond && isMid) ? 13 : (rainbow && isMid) ? 14 : 12,
+      collected: false,
+      diamond: diamond && isMid,
+      rainbow: rainbow && isMid,
+      spin: Math.random() * Math.PI * 2
+    };
+    // 落在障碍里的一枚直接丢弃，避免“看得见吃不到”
+    const blocked = obstacles.some(o =>
+      c.x - c.r < o.x + o.w + 8 && c.x + c.r > o.x - 8 &&
+      c.y + c.r > o.y - 6 && c.y - c.r < o.y + o.h + 6);
+    if (!blocked) coins.push(c);
+  }
+}
+
+function spawnDust(cx, cy, n) {
+  for (let i = 0; i < n; i++) {
+    dust.push({
+      x: cx + (Math.random() * 2 - 1) * 10,
+      y: cy + (Math.random() * 2 - 1) * 3,
+      vx: (Math.random() * 2 - 1) * 55,
+      vy: -25 - Math.random() * 45,
+      r: 1.6 + Math.random() * 2.4,
+      life: 0.32 + Math.random() * 0.22,
+      max: 0.54
+    });
+  }
+  if (dust.length > 40) dust.splice(0, dust.length - 40);
+}
+
+function addPopup(x, y, text, color) {
+  popups.push({ x, y, text, color, life: 0.85, max: 0.85 });
+  if (popups.length > 14) popups.shift();
+}
+
+function spawnPad() {
+  // 地面弹跳板：踩上弹得更高，不造成伤害；上方配一串奖励金币
+  const w = 46, h = 14;
+  pads.push({ x: W + 40, y: GROUND_Y - h, w, h, compress: 0 });
+  coins.push({ x: W + 40 + w / 2, y: GROUND_Y - 150, r: 12, collected: false, spin: Math.random() * Math.PI * 2 });
+  coins.push({ x: W + 40 + w / 2, y: GROUND_Y - 195, r: 12, collected: false, spin: Math.random() * Math.PI * 2 });
+}
+
+function spawnPowerup() {
+  // 三种限时道具等概率刷出；高度落在跳跃 / 飞行均可触及的区间
+  const types = ['magnet', 'shield', 'dash'];
+  const type = types[Math.floor(Math.random() * types.length)];
+  const y = GROUND_Y - 70 - Math.random() * 80;
+  powerups.push({ x: W + 30, y, r: 15, type, spin: Math.random() * Math.PI * 2, collected: false });
+}
+
+// ---------- 碰撞 ----------
+function overlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x &&
+         a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function inRect(mx, my, r) {
+  return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
+}
+
+// ---------- 绘制辅助 ----------
+// 背景渐变恒定，模块级缓存，避免每帧 createLinearGradient 分配
+const skyGrads = [], groundGrads = [];
+let hudDiamondGrad = null; // HUD 钻石图标渐变（位置固定，全局只建一次）
+function getSkyGrad() {
+  if (!skyGrads[mapIndex]) {
+    const m = MAPS[mapIndex];
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, m.sky[0]);
+    g.addColorStop(0.55, m.sky[1]);
+    g.addColorStop(1, m.sky[2]);
+    skyGrads[mapIndex] = g;
+  }
+  return skyGrads[mapIndex];
+}
+function getGroundGrad() {
+  if (!groundGrads[mapIndex]) {
+    const m = MAPS[mapIndex];
+    const g = ctx.createLinearGradient(0, GROUND_Y, 0, H);
+    g.addColorStop(0, m.ground[0]);
+    g.addColorStop(1, m.ground[1]);
+    groundGrads[mapIndex] = g;
+  }
+  return groundGrads[mapIndex];
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// ---------- 设计系统 ----------
+// 一套克制的暗色玻璃令牌：中性灰阶 + 单一强调色，避免花哨渐变与彩色描边
+const UI = {
+  ink: '#F3F4F6',
+  ink2: 'rgba(243,244,246,.58)',
+  ink3: 'rgba(243,244,246,.32)',
+  line: 'rgba(255,255,255,.075)',
+  lineStrong: 'rgba(255,255,255,.16)',
+  surface: 'rgba(21,23,28,.86)',
+  surfaceSolid: '#15171C',
+  hi: 'rgba(255,255,255,.05)',
+  accent: '#7CC8EB',
+  gold: '#E6BE6A',
+  font: '-apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif'
+};
+const RAD = { card: 24, btn: 14, chip: 10 };
+function uiFont(weight, size) { return weight + ' ' + size + 'px ' + UI.font; }
+
+// 面板：一块纯色深面，无描边、无高光；层级交给留白与排版，而不是边框
+function uiPanel(x, y, w, h, r, solid, opaque) {
+  ctx.fillStyle = opaque ? UI.surfaceSolid : (solid ? UI.surfaceSolid : UI.surface);
+  roundRect(x, y, w, h, r);
+  ctx.fill();
+}
+
+// 列表渐隐：上下边缘把被裁切的半行内容淡淡吃掉，避免“半截字”贴在卡片边缘
+function drawListFade(top, bottom, showTop) {
+  const fh = 40;
+  // 只在滚动离开顶部后才启用上边缘渐隐，避免遮住初始状态的区块标题
+  if (showTop) {
+    // 先压一段不透明遮罩盖住硬切线，再过渡到透明
+    const gt = ctx.createLinearGradient(0, top, 0, top + fh);
+    gt.addColorStop(0, UI.surfaceSolid);
+    gt.addColorStop(0.42, UI.surfaceSolid);
+    gt.addColorStop(1, 'rgba(21,23,28,0)');
+    ctx.fillStyle = gt;
+    ctx.fillRect(28, top, W - 56, fh);
+  }
+  const g = ctx.createLinearGradient(0, bottom - fh, 0, bottom);
+  g.addColorStop(0, 'rgba(21,23,28,0)');
+  g.addColorStop(1, 'rgba(21,23,28,.99)');
+  ctx.fillStyle = g;
+  ctx.fillRect(28, bottom - fh, W - 56, fh);
+}
+
+// 金币图标（HUD / 结算 / 商店共用同一套画法）
+function drawCoinIcon(cx, cy, r) {
+  ctx.fillStyle = UI.gold;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,.22)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(0,0,0,.24)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.55, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+// 钻石图标：菱形，冷色点缀
+function drawDiamondIcon(cx, cy, r) {
+  ctx.fillStyle = '#9FDCEF';
+  ctx.beginPath();
+  ctx.moveTo(cx - r, cy - r * 0.15);
+  ctx.lineTo(cx, cy - r);
+  ctx.lineTo(cx + r, cy - r * 0.15);
+  ctx.lineTo(cx, cy + r);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(47,143,181,.55)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+// ---------- 更新 ----------
+let last = 0;
+function loop(t) {
+  const dt = Math.min((t - last) / 1000, 0.033);
+  last = t;
+  // 顿帧：命中的瞬间冻结世界（仍照常绘制），制造撞击的重量感
+  if (hitStop > 0) {
+    hitStop = Math.max(0, hitStop - dt);
+  } else {
+    update(dt);
+  }
+  // 震屏幅度按时间衰减
+  if (shake > 0) shake = Math.max(0, shake - dt * 32);
+  draw();
+  requestAnimationFrame(loop);
+}
+// 切回前台时重置时间基准，避免回前台瞬间出现大 dt
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    // 切到后台：自动暂停并落盘，避免回来一瞬间被障碍撞死
+    if (state === 'playing') pauseGame();
+    flushSave();
+  } else {
+    last = performance.now();
+    ensureAudio();
+  }
+});
+window.addEventListener('pagehide', () => flushSave());
+
+function update(dt) {
+  // 寒风环境声：仅雪天对局进行中响起，其余状态（暂停 / 死亡 / 主页 / 切图）停止
+  wind.sync(MAPS[mapIndex].snow && state === 'playing' && !document.hidden);
+
+  // 远景滚动：游戏中随速度，暂停时静止，其余界面缓慢漂移
+  const bgSpeed = state === 'playing' ? speed * 0.25 : state === 'paused' ? 0 : 60;
+  clouds.forEach(c => { c.x -= bgSpeed * 0.4 * dt; if (c.x < -80) c.x = W + 60; });
+  hills.forEach(h => { h.x -= bgSpeed * dt; if (h.x + h.w < -20) h.x = W + 20; });
+  rains.forEach(r => {
+    r.y += r.spd * dt;
+    r.x -= 60 * dt;
+    if (r.y > GROUND_Y) { r.y = -10; r.x = Math.random() * W; }
+  });
+  snows.forEach(s => {
+    s.y += s.spd * dt;
+    s.phase += dt * 1.5;
+    s.x += Math.sin(s.phase) * s.drift * dt;
+    if (s.y > GROUND_Y) { s.y = -10; s.x = Math.random() * W; }
+    if (s.x < -10) s.x = W + 10;
+    if (s.x > W + 10) s.x = -10;
+  });
+
+  // 开屏：极简淡入放大，到时进入开始界面；不跑玩法逻辑
+  if (state === 'splash') {
+    splashTimer += dt;
+    if (splashTimer >= SPLASH_DUR) state = 'ready';
+    return;
+  }
+
+  // 主页：累计停留时间，驱动标题漂浮呼吸动效
+  if (state === 'ready') { readyTime += dt; return; }
+
+  if (state !== 'playing') return;
+
+  // 难度：随时间加速，上限与加速率按档位，避免速度失控
+  speed = Math.min(speed + curDiff().accel * dt, curDiff().max);
+  distance += speed * dt;
+  score = Math.floor(distance / 40) + coinScore;
+
+  // 每越过 100 分播报一次里程碑
+  const ms = Math.floor(score / 100);
+  if (ms > lastMilestone) { lastMilestone = ms; sfx.milestone(); }
+
+  // 翅膀解锁：分数达到档位即获得翅膀，进入 7 秒飞行；档位随分累计可重复触发
+  if (flyTimer <= 0 && score >= flyNextAt) {
+    flyTimer = FLY_FUEL_MAX;
+    flyNextAt += FLY_NEED;
+    player.vy = FLY_LIFT * 0.8;
+    player.onGround = false;
+    player.jumps = 2;
+    setEmote('excited', 1.2);
+    sfx.wings();
+  }
+
+  // 燃料消耗：滑翔按 1 倍速烧（托举的额外消耗在 jump() 里扣）
+  if (flyTimer > 0) {
+    flyTimer -= dt;
+    if (flyTimer <= 0) {
+      flyTimer = 0;
+      player.jumps = player.onGround ? 0 : 1;
+      sfx.flyEnd();
+    }
+  }
+
+  // 连击倒计时：超时未吃金币则连击清零
+  if (comboTimer > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) { if (combo > 0) sfx.comboBreak(); combo = 0; }
+  }
+
+  // 受击无敌计时
+  if (invuln > 0) invuln -= dt;
+
+  // 存档节流落盘：有脏数据时最多每 0.8 秒写一次
+  if (saveDirty) {
+    saveCooldown -= dt;
+    if (saveCooldown <= 0) { flushSave(); saveCooldown = 0.8; }
+  }
+
+  // 限时道具倒计时衰减
+  if (magnetTimer > 0) magnetTimer = Math.max(0, magnetTimer - dt);
+  if (dashTimer > 0) dashTimer = Math.max(0, dashTimer - dt);
+  if (shieldOn) {
+    shieldTimer -= dt;
+    if (shieldTimer <= 0) { shieldOn = false; shieldTimer = 0; }
+  }
+
+  // 表情计时：临时表情到期后回到默认（死亡表情保持不变）
+  if (emoteTimer > 0) {
+    emoteTimer -= dt;
+    if (emoteTimer <= 0 && emote !== 'dead') emote = 'idle';
+  }
+  // 彩虹币拾取流光衰减
+  if (rainbowFlash > 0) rainbowFlash = Math.max(0, rainbowFlash - dt);
+  if (diamondFlash > 0) diamondFlash = Math.max(0, diamondFlash - dt);
+
+  // 周期性眨眼（对局中、非死亡）
+  if (state === 'playing' && emote !== 'dead') {
+    if (blinkHold > 0) {
+      blinkHold -= dt;
+      if (blinkHold <= 0) blinkOn = false;
+    } else {
+      blinkTimer -= dt;
+      if (blinkTimer <= 0) {
+        blinkOn = true;
+        blinkHold = 0.12;
+        blinkTimer = 2.2 + Math.random() * 1.8;
+      }
+    }
+  }
+
+  // 玩家物理
+  if (flyTimer > 0) {
+    // 飞行中：抵消重力，速度向 0 收敛形成悬浮；点按托举上爬，松手以固定速度滑翔下沉
+    const damp = Math.pow(0.18, dt);
+    player.vy *= damp;
+    player.vy += 110 * dt; // 滑翔下沉：不托举时约 60~70px/s 缓慢降落
+    if (player.y < FLY_MIN_Y) { player.y = FLY_MIN_Y; player.vy = Math.max(player.vy, 0); }
+  } else {
+    player.vy += GRAVITY * dt;
+  }
+
+  // 弹跳板触发：下落或着地时脚底踩到板面，弹得更高（不扣血）；飞行中不触发
+  if (flyTimer <= 0) for (const p of pads) {
+    const horiz = player.x + player.w > p.x && player.x < p.x + p.w;
+    if (horiz && player.vy >= 0 && player.y >= p.y - 8 && player.y <= p.y + p.h + 6) {
+      player.vy = SPRING_V;
+      player.onGround = false;
+      player.jumps = 1; // 弹起后仍可再二段跳一次
+      p.compress = 1;
+      sfx.spring();
+      setEmote('excited', 0.6);
+      break;
+    }
+  }
+
+  // 手感计时：土狼窗口 / 跳跃缓冲
+  if (player.onGround) coyoteTimer = COYOTE_TIME;
+  else if (coyoteTimer > 0) coyoteTimer = Math.max(0, coyoteTimer - dt);
+  if (jumpBufferTimer > 0) jumpBufferTimer = Math.max(0, jumpBufferTimer - dt);
+
+  player.y += player.vy * dt;
+  // 飞行中滑翔到地面 = 主动收翅膀（给玩家提前结束飞行的主动权）
+  if (player.y >= GROUND_Y && (flyTimer <= 0 || player.vy > 0)) {
+    if (!player.onGround && player.vy > 0) {
+      sfx.land();
+      addFootprint();
+      squash = 0.75;                       // 落地压扁
+      spawnDust(player.x + player.w / 2, GROUND_Y + 9, player.vy > 500 ? 7 : 4);
+    }
+    player.y = GROUND_Y;
+    player.vy = 0;
+    player.onGround = true;
+    player.jumps = 0;
+    if (flyTimer > 0) { flyTimer = 0; sfx.flyEnd(); }  // 贴地即收翅膀
+    // 跳跃缓冲消费：落地前已按过跳跃，这里立即补一次起跳
+    if (jumpBufferTimer > 0 && state === 'playing') {
+      jumpBufferTimer = 0;
+      jump();
+    }
+  }
+  // 形变回弹：按帧率无关的指数收敛回到自然比例
+  if (squash !== 0) {
+    squash *= Math.pow(0.02, dt);
+    if (Math.abs(squash) < 0.02) squash = 0;
+  }
+  // 扬尘 / 飘字生命周期（随世界滚动、逐渐消失）
+  for (let i = dust.length - 1; i >= 0; i--) {
+    const p = dust[i];
+    p.x += (p.vx - speed * 0.35) * dt;
+    p.y += p.vy * dt;
+    p.vy += 160 * dt;
+    p.life -= dt;
+    if (p.life <= 0) dust.splice(i, 1);
+  }
+  for (let i = popups.length - 1; i >= 0; i--) {
+    const p = popups[i];
+    p.x -= speed * 0.3 * dt;
+    p.y -= 34 * dt;
+    p.life -= dt;
+    if (p.life <= 0) popups.splice(i, 1);
+  }
+  player.runFrame += dt * 12;
+
+  // 生成障碍：按“已滚动距离”判定；最小间距不小于一次跳跃的水平距离，保证高速下依然可解
+  spawnDist -= speed * dt;
+  if (spawnDist <= 0) {
+    // 与弹跳板 / 道具抢位时让路，避免落脚点被障碍吃掉
+    spawnDist = spawnObstacle() ? nextObstacleGap() : 70;
+  }
+  coinTimer -= dt;
+  if (coinTimer <= 0) {
+    spawnCoinArc();
+    // 金币串比单枚厚，间隔相应拉长，避免货币通胀过快
+    coinTimer = 2.4 + Math.random() * 1.4;
+  }
+  padTimer -= dt;
+  if (padTimer <= 0) {
+    spawnPad();
+    padTimer = 5 + Math.random() * 3.5;
+  }
+  powerupTimer -= dt;
+  if (powerupTimer <= 0) {
+    spawnPowerup();
+    powerupTimer = 7 + Math.random() * 4;
+  }
+
+  // 移动世界元素，并原地回收出屏 / 已收集对象（避免每帧 filter 分配新数组）
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    obstacles[i].x -= speed * dt;
+    if (obstacles[i].x + obstacles[i].w <= -20) obstacles.splice(i, 1);
+  }
+  for (let i = pads.length - 1; i >= 0; i--) {
+    const p = pads[i];
+    p.x -= speed * dt;
+    if (p.compress > 0) p.compress = Math.max(0, p.compress - dt * 3);
+    if (p.x + p.w <= -20) pads.splice(i, 1);
+  }
+  for (let i = coins.length - 1; i >= 0; i--) {
+    const c = coins[i];
+    if (!c.collected) c.x -= speed * dt;
+    c.spin += dt * 5;
+    if (c.x <= -30 || c.collected) coins.splice(i, 1);
+  }
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const p = powerups[i];
+    p.x -= speed * dt;
+    p.spin += dt * 4;
+    if (p.x <= -30 || p.collected) powerups.splice(i, 1);
+  }
+  // 脚印随世界左移并逐渐消退
+  for (let i = footprints.length - 1; i >= 0; i--) {
+    const f = footprints[i];
+    f.x -= speed * dt;
+    f.life -= dt;
+    if (f.life <= 0 || f.x <= -20) footprints.splice(i, 1);
+  }
+
+  // 磁铁激活：范围内的金币 / 钻石自动朝玩家吸附
+  if (magnetTimer > 0) {
+    const pcx = player.x + player.w / 2;
+    const pcy = player.y - player.h / 2;
+    for (const c of coins) {
+      if (c.collected) continue;
+      const dx = pcx - c.x;
+      const dy = pcy - c.y;
+      if (Math.abs(dx) < MAGNET_RADIUS && Math.abs(dy) < 150) {
+        const pull = 420 * dt;
+        const dist = Math.hypot(dx, dy) || 1;
+        c.x += (dx / dist) * pull;
+        c.y += (dy / dist) * pull;
+      }
+    }
+  }
+
+  // 碰撞：障碍（无敌期间不判定；扣一条命并短暂无敌，命尽才结束）
+  pBox.x = player.x + 4;
+  pBox.y = player.y - player.h + 4;
+  pBox.w = player.w - 8;
+  pBox.h = player.h - 4;
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    const o = obstacles[i];
+    if (flyTimer > 0) break; // 飞行中无敌，越过障碍不判定
+    if (invuln > 0) break; // 无敌中，跳过全部障碍判定
+    if (overlap(pBox, o)) {
+      // 冲刺中：撞碎障碍，不扣血，返还少量分数
+      if (dashTimer > 0) {
+        obstacles.splice(i, 1);
+        coinScore += 2;
+        shake = Math.max(shake, 5);   // 撞碎时轻震，强调“碾过去”的爽感
+        hitStop = Math.max(hitStop, 0.035);
+        sfx.spring();
+        continue;
+      }
+      // 护盾激活：抵挡一次伤害，破盾后进入短暂无敌
+      if (shieldOn) {
+        shieldOn = false;
+        shieldTimer = 0;
+        invuln = INVULN_DUR;
+        obstacles.splice(i, 1);
+        shake = Math.max(shake, 7);
+        hitStop = Math.max(hitStop, 0.05);
+        sfx.powerBreak();
+        setEmote('happy', 0.6);
+        continue;
+      }
+      lives--;
+      if (lives <= 0) {
+        state = 'dead';
+        emote = 'dead';
+        emoteTimer = 0;
+        const newRecord = score > best;
+        sfx.die();
+        shake = 15;                    // 死亡重震
+        hitStop = 0.12;                // 死亡顿帧，让“撞死”有分量
+        spawnDust(player.x + player.w / 2, player.y - player.h / 2, 10);
+        if (newRecord) {
+          best = score;
+          try { localStorage.setItem('runner_best', best); } catch (e) {}
+          sfx.record();
+        }
+        flushSave();                   // 结算落盘
+        break;
+      }
+      // 未殒命：进入无敌，移除撞上的障碍，避免叠在身上反复扣血
+      invuln = INVULN_DUR;
+      sfx.hurt();
+      shake = 9;                     // 受击震动
+      hitStop = 0.07;                // 受击顿帧
+      spawnDust(player.x + player.w / 2, player.y - player.h / 2, 6);
+      setEmote('hurt', 0.8);
+      if (lives === 1) sfx.warning(); // 仅剩一条命：警示音
+      obstacles.splice(i, 1);
+    }
+  }
+  // 已在本帧殒命，不再结算金币
+  if (state === 'dead') return;
+
+  // 碰撞：限时道具（拾取即激活对应增益）
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const p = powerups[i];
+    if (p.collected) continue;
+    coinBox.x = p.x - p.r;
+    coinBox.y = p.y - p.r;
+    coinBox.w = p.r * 2;
+    coinBox.h = p.r * 2;
+    if (overlap(pBox, coinBox)) {
+      p.collected = true;
+      if (p.type === 'magnet') {
+        magnetTimer = MAGNET_DUR;
+        sfx.magnet();
+        setEmote('excited', 0.8);
+      } else if (p.type === 'shield') {
+        shieldOn = true;
+        shieldTimer = SHIELD_DUR;
+        sfx.shield();
+        setEmote('happy', 0.8);
+      } else {
+        dashTimer = DASH_DUR;
+        sfx.dash();
+        setEmote('excited', 0.8);
+      }
+    }
+  }
+
+  // 碰撞：金币（连击倍率）
+  for (const c of coins) {
+    coinBox.x = c.x - c.r;
+    coinBox.y = c.y - c.r;
+    coinBox.w = c.r * 2;
+    coinBox.h = c.r * 2;
+    if (!c.collected && overlap(pBox, coinBox)) {
+      c.collected = true;
+      combo++;
+      comboTimer = COMBO_WINDOW;
+      const mult = Math.min(combo, COMBO_MAX);
+      const val = c.diamond ? 10 : c.rainbow ? 5 : 1;
+      coinScore += val * mult;
+      totalCoins += val;
+      markSave();   // 只置脏标记，由节流统一落盘
+      addPopup(
+        c.x, c.y - 6,
+        '+' + (val * mult),
+        c.diamond ? '#bfeef7' : c.rainbow ? '#f2a6ff' : '#f2c14e'
+      );
+      spawnDust(c.x, c.y, 3);
+      if (c.diamond) {
+        diamondCount++;
+        totalDiamonds++;
+        addPopup(c.x, c.y - 26, '钻石 +1', '#bfeef7');
+        sfx.diamond();
+        setEmote('excited', 0.8);
+        diamondFlash = 0.35;
+      } else if (c.rainbow) {
+        sfx.rainbow();
+        setEmote('happy', 0.8);
+        rainbowFlash = 0.35;
+      } else {
+        sfx.coin();
+      }
+      if (combo >= 3) sfx.combo(combo);
+    }
+  }
+}
+
+// ---------- 绘制 ----------
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // 震屏：世界层轻微推近 + 随机偏移，盖住边缘不外露；HUD 不参与震动，保证读数值稳定
+  ctx.save();
+  if (shake > 0.3) {
+    const z = 1 + shake * 0.0025;
+    ctx.translate(W / 2, H / 2);
+    ctx.scale(z, z);
+    ctx.translate(-W / 2, -H / 2);
+    ctx.translate((Math.random() * 2 - 1) * shake, (Math.random() * 2 - 1) * shake * 0.7);
+  }
+
+  // 分层天空渐变（按当前地图缓存）
+  const map = MAPS[mapIndex];
+  ctx.fillStyle = getSkyGrad();
+  ctx.fillRect(0, 0, W, H);
+
+  // 白天：右上角太阳 + 光晕
+  if (map.day) {
+    ctx.fillStyle = 'rgba(255,236,150,.35)';
+    ctx.beginPath();
+    ctx.arc(W - 84, 92, 34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffd95e';
+    ctx.beginPath();
+    ctx.arc(W - 84, 92, 22, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 远山（柔和半透明三角）
+  ctx.fillStyle = map.hill;
+  hills.forEach(h => {
+    ctx.beginPath();
+    ctx.moveTo(h.x, GROUND_Y);
+    ctx.lineTo(h.x + h.w / 2, GROUND_Y - h.h);
+    ctx.lineTo(h.x + h.w, GROUND_Y);
+    ctx.closePath();
+    ctx.fill();
+  });
+
+  // 云
+  ctx.fillStyle = map.cloud;
+  clouds.forEach(c => {
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 18 * c.s, 0, Math.PI * 2);
+    ctx.arc(c.x + 22 * c.s, c.y + 4 * c.s, 14 * c.s, 0, Math.PI * 2);
+    ctx.arc(c.x - 22 * c.s, c.y + 5 * c.s, 13 * c.s, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // 雨天：斜向雨丝
+  if (map.rain) {
+    ctx.strokeStyle = 'rgba(220,230,235,.35)';
+    ctx.lineWidth = 1.2;
+    rains.forEach(r => {
+      ctx.beginPath();
+      ctx.moveTo(r.x, r.y);
+      ctx.lineTo(r.x - 4, r.y + r.len);
+      ctx.stroke();
+    });
+  }
+
+  // 雪天：分层飘落的雪花（大小 / 透明度区分远近）
+  if (map.snow) {
+    snows.forEach(s => {
+      ctx.fillStyle = s.color;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  // 地面（纵向渐变，按当前地图缓存）
+  ctx.fillStyle = getGroundGrad();
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  ctx.fillStyle = map.groundTop;
+  ctx.fillRect(0, GROUND_Y, W, 6);
+
+  // 雪天：地面顶部一层蓬松积雪描边（圆润鼓包 + 白色雪沿），仅作用于雪天
+  if (map.snow) {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, GROUND_Y, W, 4);
+    const puffGap = 26;
+    const puffOff = distance % puffGap;
+    for (let x = -puffOff; x < W + puffGap; x += puffGap) {
+      ctx.beginPath();
+      ctx.arc(x + puffGap / 2, GROUND_Y + 2, 7, Math.PI, 0);
+      ctx.fill();
+    }
+  }
+
+  // 地面滚动刻度
+  ctx.fillStyle = map.tick;
+  const tickGap = 60;
+  const offset = (distance % tickGap);
+  for (let x = -offset; x < W; x += tickGap) {
+    ctx.fillRect(x, GROUND_Y + 18, 24, 4);
+  }
+
+  // 雪天：渐隐的落地脚印（浅灰蓝椭圆，随寿命变淡）
+  if (map.snow) {
+    footprints.forEach(f => {
+      const a = 0.42 * Math.max(0, f.life / f.maxLife);
+      ctx.fillStyle = 'rgba(90,120,140,' + a.toFixed(2) + ')';
+      ctx.beginPath();
+      ctx.ellipse(f.x, f.y + f.side * 1.5, 4.5, 3, 0, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  // 金币（翻面转动的金属硬币：光晕 + 币体 + 外缘 + 内圈 + 中央菱形 + 高光）
+  coins.forEach(c => {
+    if (c.collected) return;
+
+    // 钻石：青蓝切割宝石，上下浮动，独立绘制
+    if (c.diamond) {
+      const fy = c.y + Math.sin(c.spin * 2) * 3;
+      const r = c.r;
+      // 光晕
+      ctx.fillStyle = 'rgba(120,210,235,.25)';
+      ctx.beginPath();
+      ctx.ellipse(c.x, fy, r + 5, r + 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // 宝石主体（菱形刻面）
+      const grad = ctx.createLinearGradient(c.x, fy - r, c.x, fy + r);
+      grad.addColorStop(0, '#bfeef7');
+      grad.addColorStop(0.5, '#5fc6e0');
+      grad.addColorStop(1, '#2f8fb5');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(c.x - r, fy - r * 0.2);
+      ctx.lineTo(c.x, fy - r);
+      ctx.lineTo(c.x + r, fy - r * 0.2);
+      ctx.lineTo(c.x, fy + r);
+      ctx.closePath();
+      ctx.fill();
+      // 刻面线
+      ctx.strokeStyle = 'rgba(255,255,255,.5)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(c.x - r, fy - r * 0.2);
+      ctx.lineTo(c.x + r, fy - r * 0.2);
+      ctx.moveTo(c.x, fy - r);
+      ctx.lineTo(c.x, fy + r);
+      ctx.stroke();
+      // 高光
+      ctx.fillStyle = 'rgba(255,255,255,.85)';
+      ctx.fillRect(c.x - r * 0.45, fy - r * 0.55, 3, 3);
+      return;
+    }
+
+    const flip = Math.abs(Math.cos(c.spin));
+    const rx = c.r * (0.35 + 0.65 * flip);
+    // 彩虹金币：色相随旋转循环，光晕更大更亮
+    const hue = (c.spin * 60) % 360;
+    const body = c.rainbow ? `hsl(${hue},85%,60%)` : '#f2c14e';
+    const edge = c.rainbow ? `hsl(${hue},70%,45%)` : '#c98f22';
+    const inner = c.rainbow ? `hsla(${hue},80%,80%,.6)` : 'rgba(184,127,28,.55)';
+    const core = c.rainbow ? '#ffffff' : '#b87f1c';
+
+    // 外圈光晕
+    ctx.fillStyle = c.rainbow ? `hsla(${hue},90%,65%,.22)` : 'rgba(242,193,78,.15)';
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, c.r + 5, c.r + 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 币体
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, rx, c.r, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 外缘描边
+    ctx.strokeStyle = edge;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, rx, c.r, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 内圈
+    ctx.strokeStyle = inner;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, rx * 0.6, c.r * 0.6, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 中央菱形
+    ctx.fillStyle = core;
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillRect(-c.r * 0.22, -c.r * 0.22, c.r * 0.44, c.r * 0.44);
+    ctx.restore();
+
+    // 左上高光
+    ctx.fillStyle = 'rgba(255,255,255,.5)';
+    ctx.beginPath();
+    ctx.ellipse(c.x - rx * 0.3, c.y - c.r * 0.35, rx * 0.22, c.r * 0.16, -0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 彩虹币外围星芒
+    if (c.rainbow) {
+      ctx.strokeStyle = `hsla(${hue},90%,75%,.7)`;
+      ctx.lineWidth = 1;
+      const ray = c.r + 2;
+      ctx.beginPath();
+      ctx.moveTo(c.x, c.y - ray - 3);
+      ctx.lineTo(c.x, c.y - ray);
+      ctx.moveTo(c.x, c.y + ray);
+      ctx.lineTo(c.x, c.y + ray + 3);
+      ctx.moveTo(c.x - ray - 3, c.y);
+      ctx.lineTo(c.x - ray, c.y);
+      ctx.moveTo(c.x + ray, c.y);
+      ctx.lineTo(c.x + ray + 3, c.y);
+      ctx.stroke();
+    }
+  });
+
+  // 障碍（主体 + 顶部高光 + 底部暗部）
+  obstacles.forEach(o => {
+    ctx.fillStyle = '#cf6a5e';
+    roundRect(o.x, o.y, o.w, o.h, 6);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.14)';
+    roundRect(o.x + 3, o.y + 3, o.w - 6, 6, 3);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,.20)';
+    roundRect(o.x + 3, o.y + o.h - 8, o.w - 6, 5, 3);
+    ctx.fill();
+  });
+
+  // 弹跳板（青绿增益机关；踩下时压缩回弹，上方箭头提示）
+  pads.forEach(p => {
+    const squash = 1 - 0.35 * p.compress;
+    const h = p.h * squash;
+    const y = GROUND_Y - h;
+    ctx.fillStyle = '#4aa88a';
+    roundRect(p.x, y, p.w, h, 6);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.25)';
+    roundRect(p.x + 4, y + 2, p.w - 8, 4, 2);
+    ctx.fill();
+    // 向上箭头
+    ctx.fillStyle = 'rgba(255,255,255,.8)';
+    const ax = p.x + p.w / 2, ay = y - 10;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay - 6);
+    ctx.lineTo(ax - 7, ay + 2);
+    ctx.lineTo(ax + 7, ay + 2);
+    ctx.closePath();
+    ctx.fill();
+  });
+
+  // 限时道具（悬浮增益图标：磁铁紫 / 护盾蓝 / 冲刺金）
+  powerups.forEach(p => {
+    if (p.collected) return;
+    const fy = p.y + Math.sin(p.spin * 2) * 3;
+    const col = p.type === 'magnet' ? '#8b97f2' : p.type === 'shield' ? '#5fc6e0' : '#f2c14e';
+    // 外圈光晕
+    ctx.fillStyle = 'rgba(255,255,255,.14)';
+    ctx.beginPath();
+    ctx.arc(p.x, fy, p.r + 5, 0, Math.PI * 2);
+    ctx.fill();
+    // 底座圆
+    ctx.fillStyle = 'rgba(22,25,30,.55)';
+    ctx.beginPath();
+    ctx.arc(p.x, fy, p.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // 图标本体
+    ctx.fillStyle = col;
+    if (p.type === 'magnet') {
+      ctx.lineWidth = 3.5;
+      ctx.strokeStyle = col;
+      ctx.beginPath();
+      ctx.arc(p.x, fy - 2, 5, Math.PI, 0, false);
+      ctx.stroke();
+      ctx.fillRect(p.x - 5, fy - 2, 3, 6);
+      ctx.fillRect(p.x + 2, fy - 2, 3, 6);
+    } else if (p.type === 'shield') {
+      ctx.beginPath();
+      ctx.moveTo(p.x, fy - 6);
+      ctx.lineTo(p.x + 5, fy - 3);
+      ctx.lineTo(p.x + 5, fy + 2);
+      ctx.quadraticCurveTo(p.x + 5, fy + 6, p.x, fy + 8);
+      ctx.quadraticCurveTo(p.x - 5, fy + 6, p.x - 5, fy + 2);
+      ctx.lineTo(p.x - 5, fy - 3);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(p.x + 2, fy - 7);
+      ctx.lineTo(p.x - 4, fy + 1);
+      ctx.lineTo(p.x, fy + 1);
+      ctx.lineTo(p.x - 2, fy + 7);
+      ctx.lineTo(p.x + 4, fy - 1);
+      ctx.lineTo(p.x, fy - 1);
+      ctx.closePath();
+      ctx.fill();
+    }
+  });
+
+  // 落地扬尘 / 撞击碎屑（贴地绘制，被角色压在下方更自然）
+  if (dust.length) {
+    ctx.save();
+    for (const p of dust) {
+      const t = p.life / p.max;
+      const a = Math.max(0, t) * 0.36;
+      ctx.fillStyle = 'rgba(228,234,240,' + a.toFixed(2) + ')';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * (1 + (1 - t) * 0.6), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // 玩家落地投影（随离地高度变淡变小）
+  const air = Math.max(0, GROUND_Y - player.y);
+  const shadowScale = Math.max(0.45, 1 - air / 220);
+  ctx.fillStyle = 'rgba(0,0,0,' + (0.28 * shadowScale).toFixed(3) + ')';
+  ctx.beginPath();
+  ctx.ellipse(player.x + player.w / 2, GROUND_Y + 12, 17 * shadowScale, 5 * shadowScale, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 玩家（简约方块小人）
+  drawPlayer();
+
+  // 彩虹币拾取流光：短暂彩色竖条洒落
+  if (rainbowFlash > 0) {
+    const a = (rainbowFlash / 0.35) * 0.3;
+    ctx.save();
+    ctx.globalAlpha = a;
+    for (let i = 0; i < 6; i++) {
+      const hue = i * 60;
+      const x = (i + 0.5) * (W / 6);
+      const g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, `hsla(${hue},85%,65%,0)`);
+      g.addColorStop(0.5, `hsl(${hue},85%,65%)`);
+      g.addColorStop(1, `hsla(${hue},85%,65%,0)`);
+      ctx.fillStyle = g;
+      ctx.fillRect(x - 12, 0, 24, H);
+    }
+    ctx.restore();
+  }
+
+  // 钻石拾取流光：青蓝竖条洒落
+  if (diamondFlash > 0) {
+    const a = (diamondFlash / 0.35) * 0.3;
+    ctx.save();
+    ctx.globalAlpha = a;
+    for (let i = 0; i < 5; i++) {
+      const x = (i + 0.5) * (W / 5);
+      const g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, 'hsla(195,85%,65%,0)');
+      g.addColorStop(0.5, 'hsl(195,85%,68%)');
+      g.addColorStop(1, 'hsla(195,85%,65%,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(x - 12, 0, 24, H);
+    }
+    ctx.restore();
+  }
+
+  // 拾取飘字（世界层之上、HUD 之下）
+  if (popups.length) {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = '700 15px -apple-system, Helvetica, Arial, sans-serif';
+    for (const p of popups) {
+      const a = Math.max(0, p.life / p.max);
+      ctx.globalAlpha = Math.min(1, a * 1.4);
+      ctx.fillStyle = p.color;
+      ctx.fillText(p.text, p.x, p.y);
+    }
+    ctx.restore();
+  }
+
+  ctx.restore();  // 结束世界层（震屏偏移）
+
+  // HUD：左列信息、右列操作与资产（游戏中 / 暂停时显示）
+  if (state === 'playing' || state === 'paused') {
+    drawHudScore(20, 18, score, best);
+    drawLives();
+    drawFlightBar();
+    drawPowerupBar();
+    drawCurrencyChip();
+    if (combo >= 2) drawComboBadge(Math.min(combo, COMBO_MAX));
+  }
+  if (state === 'playing') drawPauseButton();
+
+  // 状态遮罩
+  if (state === 'splash') {
+    drawSplash();
+  } else if (state === 'ready') {
+    drawReadyOverlay();
+  } else if (state === 'diff') {
+    drawDiffOverlay();
+  } else if (state === 'dead') {
+    drawDeadOverlay();
+  } else if (state === 'paused') {
+    drawPausedOverlay();
+  } else if (state === 'shop') {
+    drawShopOverlay();
+  } else if (state === 'skins') {
+    drawSkinsOverlay();
+  } else if (state === 'maps') {
+    drawMapsOverlay();
+  } else if (state === 'settings') {
+    drawSettingsOverlay();
+  } else if (state === 'log') {
+    drawLogOverlay();
+  }
+
+}
+
+// 主分数：去掉厚重药丸，用排版分层（标签 / 数字 / 最佳）建立层级
+function drawHudScore(x, y, value, record) {
+  ctx.textAlign = 'left';
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 10);
+  ctx.fillText('得分', x, y + 10);
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(700, 30);
+  ctx.fillText(String(value), x, y + 40);
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 11);
+  ctx.fillText('最佳 ' + record, x, y + 58);
+}
+
+function drawComboBadge(mult) {
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = UI.gold;
+  ctx.font = uiFont(600, 12);
+  ctx.fillText('×' + mult, W - 20, 106);
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+}
+
+// 生命：三段胶囊条，比红点更冷静；存活为实心亮白，失去为极淡虚位
+function drawLives() {
+  const y = 92;
+  const segW = 18, segH = 4, gap = 6;
+  for (let i = 0; i < MAX_LIVES; i++) {
+    const x = 20 + i * (segW + gap);
+    ctx.fillStyle = i < lives ? 'rgba(243,244,246,.92)' : 'rgba(243,244,246,.16)';
+    roundRect(x, y, segW, segH, 2);
+    ctx.fill();
+  }
+}
+
+// 货币：不再占一块底板，只留右上一行图标与数字
+function drawCurrencyChip() {
+  const coinTxt = String(totalCoins), diaTxt = String(totalDiamonds);
+  const y = 82, right = W - 20, iconR = 4.5;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  ctx.font = uiFont(500, 12);
+
+  const dw = ctx.measureText(diaTxt).width;
+  ctx.fillStyle = totalDiamonds > 0 ? UI.ink2 : UI.ink3;
+  ctx.fillText(diaTxt, right, y);
+  drawDiamondIcon(right - dw - 11, y, iconR);
+
+  const coinRight = right - dw - 11 - iconR * 2 - 18;
+  const cw = ctx.measureText(coinTxt).width;
+  ctx.fillStyle = UI.ink2;
+  ctx.fillText(coinTxt, coinRight, y);
+  drawCoinIcon(coinRight - cw - 9, y, iconR);
+
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+}
+
+// 燃料 / 翅膀：去掉药丸底板，改成一行“标签 + 细条 + 数值”，信息密度更轻
+// 未飞行且离解锁还远时整行隐藏，避免 HUD 长期挂着无意义的大数字
+function drawFlightBar() {
+  const flying = flyTimer > 0;
+  const remain = flyNextAt - score;
+  if (!flying && remain > 400) return;
+  const x = 20, y = 110;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 10);
+  ctx.fillText(flying ? '燃料' : '翅膀', x, y + 5);
+  // 轨道
+  const barX = x + 28, barW = 52, barH = 3, barY = y + 3.5;
+  ctx.fillStyle = 'rgba(255,255,255,.10)';
+  roundRect(barX, barY, barW, barH, 1.5);
+  ctx.fill();
+  // 进度：飞行中显示燃料余量，否则显示距下一档的解锁进度
+  const prog = flying
+    ? Math.max(0, flyTimer / FLY_FUEL_MAX)
+    : Math.min(1, Math.max(0, (score - (flyNextAt - FLY_NEED)) / FLY_NEED));
+  if (prog > 0) {
+    // 燃料见底时转琥珀，提示该贴地收了
+    ctx.fillStyle = flying ? (flyTimer < 0.9 ? UI.gold : UI.accent) : 'rgba(154,223,207,.9)';
+    roundRect(barX, barY, Math.max(barH, barW * prog), barH, 1.5);
+    ctx.fill();
+  }
+  // 只有飞行时才有必要读秒；地面状态只留进度条
+  if (flying) {
+    ctx.fillStyle = UI.ink2;
+    ctx.font = uiFont(600, 10);
+    ctx.fillText(flyTimer.toFixed(1) + 's', barX + barW + 8, y + 5);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+// 道具：不再占一整块底板，只用图标圆点 + 秒数，按需出现
+function drawPowerupBar() {
+  const active = [];
+  if (magnetTimer > 0) active.push({ type: 'magnet', t: magnetTimer });
+  if (shieldOn) active.push({ type: 'shield', t: shieldTimer });
+  if (dashTimer > 0) active.push({ type: 'dash', t: dashTimer });
+  if (!active.length) return;
+  const y = 132;
+  let ix = 20;
+  active.forEach(a => {
+    const col = a.type === 'magnet' ? UI.accent : a.type === 'shield' ? UI.accent : UI.gold;
+    const cx0 = ix + 8, cy0 = y + 7;
+    // 图标底圆
+    ctx.fillStyle = 'rgba(255,255,255,.06)';
+    ctx.beginPath();
+    ctx.arc(cx0, cy0, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = col;
+    if (a.type === 'dash') {
+      ctx.beginPath();
+      ctx.moveTo(cx0 + 1.6, cy0 - 6);
+      ctx.lineTo(cx0 - 3.4, cy0);
+      ctx.lineTo(cx0 - 0.4, cy0);
+      ctx.lineTo(cx0 - 1.6, cy0 + 6);
+      ctx.lineTo(cx0 + 3.4, cy0 - 2);
+      ctx.lineTo(cx0 + 0.4, cy0 - 2);
+      ctx.closePath();
+      ctx.fill();
+    } else if (a.type === 'shield') {
+      ctx.beginPath();
+      ctx.moveTo(cx0, cy0 - 6);
+      ctx.lineTo(cx0 + 4, cy0 - 4);
+      ctx.lineTo(cx0 + 4, cy0);
+      ctx.quadraticCurveTo(cx0 + 4, cy0 + 3, cx0, cy0 + 5);
+      ctx.quadraticCurveTo(cx0 - 4, cy0 + 3, cx0 - 4, cy0);
+      ctx.lineTo(cx0 - 4, cy0 - 4);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.lineWidth = 2.2;
+      ctx.strokeStyle = col;
+      ctx.beginPath();
+      ctx.arc(cx0, cy0 - 2, 4, Math.PI, 0);
+      ctx.stroke();
+      ctx.fillRect(cx0 - 4, cy0 - 2, 2.2, 4);
+      ctx.fillRect(cx0 + 1.8, cy0 - 2, 2.2, 4);
+    }
+    // 剩余秒数
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = UI.ink2;
+    ctx.font = uiFont(600, 10);
+    ctx.fillText(Math.ceil(a.t) + 's', ix + 20, y + 7.5);
+    ix += 54;
+  });
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawPauseButton() {
+  const cx = W - 20 - 18, cy = 39;
+  pauseBtn.x = cx;
+  pauseBtn.y = cy;
+  ctx.fillStyle = pressedPause ? UI.ink : UI.ink2;
+  roundRect(cx - 5.5, cy - 6, 3, 12, 1.5);
+  ctx.fill();
+  roundRect(cx + 2.5, cy - 6, 3, 12, 1.5);
+  ctx.fill();
+}
+
+function drawButton(btn, label, filled) {
+  const isDown = pressedBtn && pressedBtn.ref === btn;
+  const y = btn.y + (isDown ? 1 : 0);
+  if (filled) {
+    // 主操作：唯一实心块，白色胶囊
+    ctx.fillStyle = isDown ? 'rgba(236,239,242,.84)' : '#ECEEF2';
+    roundRect(btn.x, y, btn.w, btn.h, btn.h / 2);
+    ctx.fill();
+  } else if (isDown) {
+    // 次操作：无底无边，仅按下时浮现一层极淡底
+    ctx.fillStyle = UI.hi;
+    roundRect(btn.x, y, btn.w, btn.h, btn.h / 2);
+    ctx.fill();
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = filled ? '#15171B' : (isDown ? UI.ink : UI.ink2);
+  ctx.font = uiFont(filled ? 600 : 500, 15);
+  ctx.fillText(label, btn.x + btn.w / 2, y + btn.h / 2 + 0.5);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawPausedOverlay() {
+  drawBackdrop();
+  const ch = 286;
+  const cy = drawCard(ch);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(600, 20);
+  ctx.fillText('已暂停', W / 2, cy + 46);
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 11);
+  ctx.fillText('本局 ' + score, W / 2, cy + 74);
+  ctx.textBaseline = 'alphabetic';
+
+  resumeBtn.w = 196; resumeBtn.h = 46;
+  resumeBtn.x = W / 2 - 98; resumeBtn.y = cy + 106;
+  restartBtn.w = 196; restartBtn.h = 40;
+  restartBtn.x = W / 2 - 98; restartBtn.y = cy + 168;
+  pauseHomeBtn.w = 196; pauseHomeBtn.h = 40;
+  pauseHomeBtn.x = W / 2 - 98; pauseHomeBtn.y = cy + 212;
+  drawButton(resumeBtn, '继续', true);
+  drawButton(restartBtn, '重新开始', false);
+  drawButton(pauseHomeBtn, '返回主页', false);
+}
+
+function drawBackdrop() {
+  ctx.fillStyle = 'rgba(6,7,9,.62)';
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawCard(ch) {
+  const cw = W - 56;
+  const cx = 28;
+  const cy = H / 2 - ch / 2;
+  uiPanel(cx, cy, cw, ch, RAD.card, true);
+  return cy;
+}
+
+function drawSplash() {
+  // 加深背景，让开屏标题更聚焦
+  ctx.fillStyle = 'rgba(15,17,20,.72)';
+  ctx.fillRect(0, 0, W, H);
+
+  const p = Math.min(splashTimer / SPLASH_DUR, 1);
+  const ease = 1 - Math.pow(1 - p, 3); // easeOut
+  const alpha = Math.min(1, ease * 1.5);
+  const scale = 0.92 + 0.08 * ease;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(W / 2, H / 2 - 24);
+  ctx.scale(scale, scale);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // 主标题：最醒目层级
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(700, 60);
+  ctx.fillText('跳一跳', 0, -10);
+
+  // 署名小字
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 12);
+  ctx.fillText('杨海鑫自制', 0, 42);
+
+  ctx.restore();
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawDiffOverlay() {
+  drawBackdrop();
+  const ch = 348;
+  const cy = drawCard(ch);
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(600, 20);
+  ctx.fillText('选择难度', 44, cy + 44);
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 11);
+  ctx.fillText('决定这一局的节奏与容错', 44, cy + 68);
+
+  DIFFS.forEach((d, i) => {
+    const b = diffBtns[i];
+    const rowH = 58;
+    const y = cy + 96 + i * rowH;
+    b.w = W - 88; b.h = rowH;
+    b.x = 44; b.y = y;
+    const sel = i === difficulty;
+
+    // 选中只留一根强调细线，其余交给字重与明度
+    if (sel) {
+      ctx.fillStyle = UI.accent;
+      ctx.fillRect(44, y + rowH / 2 - 10, 2, 20);
+    }
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = sel ? UI.ink : UI.ink2;
+    ctx.font = uiFont(sel ? 600 : 500, 15);
+    ctx.fillText(d.name, 56, y + 21);
+    ctx.fillStyle = sel ? UI.ink2 : UI.ink3;
+    ctx.font = uiFont(500, 11);
+    ctx.fillText(d.desc, 56, y + 41);
+
+    // 行底发丝线，代替整块卡片的分隔（最后一行不画，收口更干净）
+    if (i < DIFFS.length - 1) {
+      ctx.fillStyle = UI.line;
+      ctx.fillRect(44, y + rowH, W - 88, 1);
+    }
+  });
+
+  diffBackBtn.w = 180; diffBackBtn.h = 40;
+  diffBackBtn.x = W / 2 - 90; diffBackBtn.y = cy + 294;
+  drawButton(diffBackBtn, '返回', false);
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+}
+
+function drawReadyOverlay() {
+  drawBackdrop();
+
+  // 标题区：全屏暗幕直接排版，不再套居中卡片；保留轻微漂浮
+  const bob = Math.sin(readyTime * 1.6) * 5;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(700, 54);
+  ctx.fillText('跳一跳', W / 2, 224 + bob);
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 11);
+  const meta = best > 0 ? '杨海鑫自制　·　最佳 ' + best : '杨海鑫自制';
+  ctx.fillText(meta, W / 2, 276 + bob * 0.4);
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 10);
+  ctx.fillText('轻点起跳 · 长按跳更远 · 空中再点二段跳', W / 2, 304);
+  ctx.restore();
+
+  // 资产：右上角，与 HUD 的货币位置保持一致
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.font = uiFont(600, 11);
+  const y = 44;
+  const diaTxt = String(totalDiamonds);
+  const coinTxt = String(totalCoins);
+  const dw1 = ctx.measureText(diaTxt).width;
+  const cw1 = ctx.measureText(coinTxt).width;
+  const rightEdge = W - 24;
+  drawDiamondIcon(rightEdge - dw1 - 10, y, 6);
+  ctx.fillStyle = totalDiamonds > 0 ? UI.ink2 : UI.ink3;
+  ctx.fillText(diaTxt, rightEdge, y + 0.5);
+  const coinRight = rightEdge - dw1 - 6 - 11 - 18;
+  drawCoinIcon(coinRight - cw1 - 10, y, 6);
+  ctx.fillStyle = UI.ink2;
+  ctx.fillText(coinTxt, coinRight, y + 0.5);
+  ctx.textBaseline = 'alphabetic';
+
+  // 主操作：白色胶囊，页面唯一实心块
+  startBtn.w = 224; startBtn.h = 54;
+  startBtn.x = W / 2 - 112; startBtn.y = 420;
+  drawButton(startBtn, '开始游戏', true);
+
+  // 次级入口：一行纯文字，不加底与框
+  const bw = 84, bh = 44, gap = 12;
+  const totalW = bw * 3 + gap * 2;
+  const sx = W / 2 - totalW / 2;
+  skinBtn.w = mapBtn.w = shopBtn.w = bw;
+  skinBtn.h = mapBtn.h = shopBtn.h = bh;
+  skinBtn.x = sx; mapBtn.x = sx + bw + gap; shopBtn.x = sx + 2 * (bw + gap);
+  skinBtn.y = mapBtn.y = shopBtn.y = 494;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = uiFont(500, 13);
+  [[skinBtn, '皮肤'], [mapBtn, '地图'], [shopBtn, '商店']].forEach(([b, label]) => {
+    const down = pressedBtn && pressedBtn.ref === b;
+    ctx.fillStyle = down ? UI.ink : UI.ink2;
+    ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2);
+  });
+
+  // 设置：底部一行小字，替代右下角齿轮
+  ctx.font = uiFont(500, 11);
+  const downGear = pressedBtn && pressedBtn.ref === gearBtn;
+  ctx.fillStyle = downGear ? UI.ink : 'rgba(243,244,246,.42)';
+  ctx.fillText('设置', W / 2, H - 52);
+  gearBtn.w = 88; gearBtn.h = 44;
+  gearBtn.x = W / 2 - 44; gearBtn.y = H - 74;
+  ctx.textBaseline = 'alphabetic';
+}
+
+// 齿轮图标：细环 + 环外八齿 + 中心环，避免齿压环造成的“虚线”错觉
+function drawGear(cx, cy, r) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,.03)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = UI.line;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // 八齿：只画在环外，短径向刻度
+  ctx.strokeStyle = 'rgba(243,244,246,.42)';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  for (let k = 0; k < 8; k++) {
+    const a = k * Math.PI / 4;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * (r + 1), cy + Math.sin(a) * (r + 1));
+    ctx.lineTo(cx + Math.cos(a) * (r + 4.5), cy + Math.sin(a) * (r + 4.5));
+    ctx.stroke();
+  }
+  // 中心环
+  ctx.strokeStyle = 'rgba(243,244,246,.52)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4.5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawShopOverlay() {
+  drawBackdrop();
+  const ch = 300;
+  const cy = drawCard(ch);
+  const s = skins[shopSkinIndex];
+  const has = isOwned(shopSkinIndex);
+  const affordable = totalCoins >= s.price;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(600, 20);
+  ctx.fillText('商店', W / 2, cy + 42);
+  ctx.textBaseline = 'alphabetic';
+
+  // 商品预览：迷你小人
+  const pw = 34, ph = 44;
+  const px = W / 2 - pw / 2;
+  const py = cy + 82;
+  const headH = 15;
+  // 腿与鞋
+  ctx.fillStyle = s.body;
+  ctx.fillRect(px + 4, py + ph - 12, 10, 12);
+  ctx.fillRect(px + pw - 14, py + ph - 12, 10, 12);
+  ctx.fillStyle = s.shoe;
+  ctx.fillRect(px + 2, py + ph - 5, 12, 5);
+  ctx.fillRect(px + pw - 14, py + ph - 5, 12, 5);
+  // 躯干
+  ctx.fillStyle = s.body;
+  ctx.fillRect(px, py + headH, pw, ph - headH - 12);
+  if (s.camo) {
+    ctx.fillStyle = s.camo1;
+    ctx.fillRect(px + 4, py + headH + 6, 9, 7);
+    ctx.fillRect(px + pw - 13, py + ph - 20, 10, 7);
+    ctx.fillStyle = s.camo2;
+    ctx.fillRect(px + pw - 12, py + headH + 4, 8, 6);
+  }
+  // 头
+  ctx.fillStyle = s.head;
+  ctx.fillRect(px, py, pw, headH);
+  if (s.camo) {
+    ctx.fillStyle = s.camo1;
+    ctx.fillRect(px + 5, py + 8, 8, 5);
+    ctx.fillStyle = s.camo2;
+    ctx.fillRect(px + pw - 11, py + 9, 7, 4);
+  }
+  // 帽子
+  ctx.fillStyle = s.accent;
+  ctx.fillRect(px, py, pw, 5);
+  ctx.fillRect(px + pw - 3, py + 2, 10, 4);
+  // 眼睛
+  ctx.fillStyle = '#14161a';
+  ctx.fillRect(px + pw - 11, py + 8, 6, 6);
+
+  // 名称
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(600, 17);
+  ctx.fillText(s.name, W / 2, cy + 146);
+
+  // 价格行：金币图标 + 价格
+  const priceLabel = has ? '已拥有' : (affordable ? s.price + ' 金币' : '金币不足');
+  const pr = 8;
+  ctx.font = uiFont(500, 13);
+  const ptw = ctx.measureText(priceLabel).width;
+  const rowW = ptw + 4 + pr * 2;
+  const rx = W / 2 - rowW / 2;
+  const ry = cy + 174;
+  if (!has) drawCoinIcon(rx + pr, ry - 4, pr);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = has ? UI.ink3 : UI.ink2;
+  ctx.fillText(priceLabel, rx + pr * 2 + 4, ry);
+  ctx.textAlign = 'center';
+
+  // 购买按钮（已拥有 / 不足时置灰，不可点）
+  buyBtn.w = 180; buyBtn.h = 44;
+  buyBtn.x = W / 2 - 90; buyBtn.y = cy + 196;
+  buyBtn.h = 46;
+  const buyLabel = has ? '已拥有' : (affordable ? '购买' : '金币不足');
+  drawButton(buyBtn, buyLabel, !has && affordable);
+  if (has || !affordable) {
+    ctx.fillStyle = 'rgba(10,12,15,.42)';
+    roundRect(buyBtn.x, buyBtn.y, buyBtn.w, buyBtn.h, RAD.btn);
+    ctx.fill();
+  }
+
+  // 返回主页
+  shopBackBtn.w = 180; shopBackBtn.h = 40;
+  shopBackBtn.x = W / 2 - 90; shopBackBtn.y = cy + 250;
+  drawButton(shopBackBtn, '返回', false);
+}
+
+function drawSkinsOverlay() {
+  drawBackdrop();
+  const ch = 420;
+  const cy = drawCard(ch);
+  skinSlots.length = 0;
+  hatSlots.length = 0;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(600, 22);
+  ctx.fillText('装扮', W / 2, cy + 38);
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 11);
+  ctx.fillText('持有 ' + totalCoins + ' 金币', W / 2, cy + 62);
+  ctx.textBaseline = 'alphabetic';
+
+  const inner = W - 64;
+  const gap = 12;
+  const cardW = (inner - gap * (COLS - 1)) / COLS;
+  const cardH = 104;
+  const hatW = cardW, hatH = 72;
+
+  // 列表可视裁剪区（滚动内容在区域外不绘制）
+  const listTop = cy + 84;
+  const listBottom = cy + 356;
+  const listH = listBottom - listTop;
+
+  // 内容坐标（未滚动）：皮肤标签 → 皮肤网格 → 帽子标签 → 帽子网格
+  const skinLabelY = listTop + 16;
+  const skinGridY = skinLabelY + 20;
+  const skinRows = Math.ceil(skins.length / COLS);
+  const skinBottom = skinGridY + skinRows * cardH + Math.max(0, skinRows - 1) * gap;
+  const hatLabelY = skinBottom + 24;
+  const hatGridY = hatLabelY + 16;
+  const hatRows = Math.ceil(HATS.length / COLS);
+  const hatBottom = hatGridY + hatRows * hatH + Math.max(0, hatRows - 1) * gap;
+  const contentH = hatBottom - listTop;
+
+  const maxScroll = Math.max(0, contentH - listH);
+  skinsScroll = clampScroll(skinsScroll, maxScroll);
+  skinsView = { top: listTop, h: listH, contentH };
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(32, listTop, inner, listH);
+  ctx.clip();
+  ctx.translate(0, -skinsScroll);
+
+  // 皮肤标签：贴近上下裁剪边时整段跳过，避免只剩半截字
+  if (skinLabelY - skinsScroll > cy + 96) {
+    ctx.fillStyle = UI.ink3;
+    ctx.font = uiFont(600, 12);
+    ctx.fillText('皮肤', W / 2, skinLabelY);
+  }
+
+  skins.forEach((s, i) => {
+    const col = i % COLS, row = Math.floor(i / COLS);
+    const x = 32 + col * (cardW + gap);
+    const y = skinGridY + row * (cardH + gap);
+    const has = isOwned(i);
+    const selected = i === skinIndex;
+
+    // 无卡片底：只给选中项一根下划线，格子之间靠留白分隔
+    if (selected) {
+      ctx.fillStyle = UI.accent;
+      ctx.fillRect(x + 10, y + cardH - 5, cardW - 20, 1.5);
+    }
+
+    // 预览小人
+    const pw = 28, ph = 34;
+    const px = x + cardW / 2 - pw / 2, py = y + 12, headH = 13;
+    ctx.save();
+    if (!has) ctx.globalAlpha = 0.35;
+    ctx.fillStyle = s.body;
+    ctx.fillRect(px + 4, py + ph - 10, 9, 10);
+    ctx.fillRect(px + pw - 13, py + ph - 10, 9, 10);
+    ctx.fillStyle = s.shoe;
+    ctx.fillRect(px + 2, py + ph - 5, 11, 5);
+    ctx.fillRect(px + pw - 13, py + ph - 5, 11, 5);
+    ctx.fillStyle = s.body;
+    ctx.fillRect(px, py + headH, pw, ph - headH - 10);
+    if (s.camo) {
+      ctx.fillStyle = s.camo1;
+      ctx.fillRect(px + 3, py + headH + 5, 8, 6);
+      ctx.fillRect(px + pw - 12, py + ph - 16, 9, 6);
+      ctx.fillStyle = s.camo2;
+      ctx.fillRect(px + pw - 11, py + headH + 3, 7, 5);
+    }
+    ctx.fillStyle = s.head;
+    ctx.fillRect(px, py, pw, headH);
+    if (s.camo) {
+      ctx.fillStyle = s.camo1;
+      ctx.fillRect(px + 4, py + 6, 7, 5);
+      ctx.fillStyle = s.camo2;
+      ctx.fillRect(px + pw - 10, py + 7, 6, 4);
+    }
+    ctx.fillStyle = s.accent;
+    ctx.fillRect(px, py, pw, 5);
+    ctx.fillRect(px + pw - 3, py + 2, 10, 4);
+    ctx.fillStyle = '#14161a';
+    ctx.fillRect(px + pw - 11, py + 6, 6, 6);
+    ctx.restore();
+
+    // 未拥有：锁标盖在小人中央
+    if (!has) {
+      const lx = x + cardW / 2, ly = py + ph / 2;
+      ctx.strokeStyle = 'rgba(232,234,237,.9)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(lx, ly - 3, 4, Math.PI, 0);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(232,234,237,.9)';
+      roundRect(lx - 5.5, ly - 3, 11, 9, 2);
+      ctx.fill();
+    }
+
+    // 名称：未拥有降一档明度
+    ctx.fillStyle = has ? UI.ink : UI.ink2;
+    ctx.font = uiFont(600, 15);
+    ctx.fillText(s.name, x + cardW / 2, y + 68);
+
+    // 状态：只在选中与未拥有时给字，减少满屏标签
+    if (selected) {
+      ctx.fillStyle = UI.ink2;
+      ctx.font = uiFont(500, 11);
+      ctx.fillText('使用中', x + cardW / 2, y + 90);
+    } else if (!has) {
+      ctx.fillStyle = totalCoins >= s.price ? UI.gold : UI.ink3;
+      ctx.font = uiFont(500, 11);
+      ctx.fillText(s.price + ' 金币', x + cardW / 2, y + 90);
+    }
+
+    skinSlots.push({ x, y, w: cardW, h: cardH, index: i });
+  });
+
+  // 帽子标签：贴近裁剪底边时整段跳过，避免只剩半截字
+  if (hatLabelY - skinsScroll < cy + 344) {
+    ctx.fillStyle = UI.ink3;
+    ctx.font = uiFont(600, 12);
+    ctx.fillText('帽子', W / 2, hatLabelY);
+  }
+
+  HATS.forEach((h, i) => {
+    const col = i % COLS, row = Math.floor(i / COLS);
+    const x = 32 + col * (hatW + gap);
+    const y = hatGridY + row * (hatH + gap);
+    const unlocked = isHatUnlocked(i);
+    const selected = i === hatIndex;
+
+    if (selected) {
+      ctx.fillStyle = UI.accent;
+      ctx.fillRect(x + 10, y + hatH - 4, hatW - 20, 1.5);
+    }
+
+    // 帽子图标
+    const cx = x + hatW / 2, icY = y + 24;
+    ctx.save();
+    if (!unlocked) ctx.globalAlpha = 0.35;
+    if (h.id === 'cowboy') {
+      ctx.fillStyle = h.brim;
+      roundRect(cx - 16, icY - 2, 32, 5, 2);
+      ctx.fill();
+      ctx.fillStyle = h.crown;
+      roundRect(cx - 9, icY - 12, 18, 11, 3);
+      ctx.fill();
+      ctx.fillStyle = h.band;
+      ctx.fillRect(cx - 9, icY - 3, 18, 3);
+    } else {
+      ctx.fillStyle = 'rgba(232,234,237,.7)';
+      roundRect(cx - 12, icY - 2, 24, 4, 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // 未解锁：锁标
+    if (!unlocked) {
+      ctx.strokeStyle = 'rgba(232,234,237,.9)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(cx, icY - 4, 4, Math.PI, 0);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(232,234,237,.9)';
+      roundRect(cx - 5.5, icY - 4, 11, 9, 2);
+      ctx.fill();
+    }
+
+    // 名称：未解锁降一档明度
+    ctx.fillStyle = unlocked ? UI.ink : UI.ink2;
+    ctx.font = uiFont(600, 14);
+    ctx.fillText(h.name, cx, y + 50);
+
+    // 状态：选中标“使用中”，未解锁给门槛，其余留白
+    if (selected) {
+      ctx.fillStyle = UI.ink2;
+      ctx.font = uiFont(500, 10);
+      ctx.fillText('使用中', cx, y + 64);
+    } else if (!unlocked) {
+      ctx.fillStyle = UI.ink3;
+      ctx.font = uiFont(500, 10);
+      ctx.fillText('最高分 ' + h.reqScore, cx, y + 64);
+    }
+
+    hatSlots.push({ x, y, w: hatW, h: hatH, index: i });
+  });
+
+  ctx.restore();
+
+  // 列表渐隐，暗示列表可继续下滑（滚动后才显示上缘渐隐）
+  if (maxScroll > 0) drawListFade(cy + 84, cy + 356, skinsScroll > 2);
+
+  // 返回主页（固定，不随列表滚动）
+  skinBackBtn.w = 150; skinBackBtn.h = 38;
+  skinBackBtn.x = W / 2 - 75; skinBackBtn.y = cy + 368;
+  drawButton(skinBackBtn, '返回', false);
+}
+
+function drawMapsOverlay() {
+  drawBackdrop();
+  const ch = 420;
+  const cy = drawCard(ch);
+  mapSlots.length = 0;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(600, 22);
+  ctx.fillText('地图', W / 2, cy + 46);
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 11);
+  ctx.fillText('选择场景，付费场景需兑换', W / 2, cy + 74);
+  ctx.textBaseline = 'alphabetic';
+
+  const inner = W - 64;
+  const gap = 12;
+  const cardW = (inner - gap * (COLS - 1)) / COLS;
+  const cardH = 112;
+
+  // 列表可视裁剪区
+  const listTop = cy + 92;
+  const listBottom = cy + 356;
+  const listH = listBottom - listTop;
+  const gridY = listTop + 8;
+  const rows = Math.ceil(MAPS.length / COLS);
+  const contentH = gridY - listTop + rows * cardH + Math.max(0, rows - 1) * gap;
+
+  const maxScroll = Math.max(0, contentH - listH);
+  mapsScroll = clampScroll(mapsScroll, maxScroll);
+  mapsView = { top: listTop, h: listH, contentH };
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(32, listTop, inner, listH);
+  ctx.clip();
+  ctx.translate(0, -mapsScroll);
+
+  MAPS.forEach((m, i) => {
+    const col = i % COLS, row = Math.floor(i / COLS);
+    const x = 32 + col * (cardW + gap);
+    const y = gridY + row * (cardH + gap);
+    const owned = isMapOwned(i);
+    const selected = i === mapIndex;
+
+    if (selected) {
+      ctx.fillStyle = UI.accent;
+      ctx.fillRect(x + 10, y + cardH - 5, cardW - 20, 1.5);
+    }
+
+    // 缩略背景预览
+    const pw = 72, ph = 42;
+    const px = x + cardW / 2 - pw / 2, py = y + 14;
+    ctx.save();
+    if (!owned) ctx.globalAlpha = 0.4;
+    const g = ctx.createLinearGradient(0, py, 0, py + ph);
+    g.addColorStop(0, m.sky[0]);
+    g.addColorStop(1, m.sky[1]);
+    ctx.fillStyle = g;
+    roundRect(px, py, pw, ph, 8);
+    ctx.fill();
+    // 地面条
+    ctx.fillStyle = m.ground[0];
+    ctx.fillRect(px, py + ph - 10, pw, 10);
+    // 白天太阳 / 黑夜月亮 / 雨天雨丝
+    if (m.day) {
+      ctx.fillStyle = '#ffd95e';
+      ctx.beginPath();
+      ctx.arc(px + pw - 16, py + 12, 7, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (m.rain) {
+      ctx.strokeStyle = 'rgba(220,230,235,.7)';
+      ctx.lineWidth = 1;
+      for (let k = 0; k < 4; k++) {
+        const rx = px + 14 + k * 14;
+        ctx.beginPath();
+        ctx.moveTo(rx, py + 8);
+        ctx.lineTo(rx - 3, py + 20);
+        ctx.stroke();
+      }
+    } else if (m.snow) {
+      ctx.fillStyle = 'rgba(255,255,255,.9)';
+      for (let k = 0; k < 5; k++) {
+        const sx = px + 12 + k * 13;
+        const sy = py + 8 + (k % 2) * 12;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else {
+      ctx.fillStyle = 'rgba(232,234,237,.8)';
+      ctx.beginPath();
+      ctx.arc(px + pw - 16, py + 12, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(40,48,58,.8)';
+      ctx.beginPath();
+      ctx.arc(px + pw - 13, py + 10, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // 未拥有：锁标盖在预览中央
+    if (!owned) {
+      const lx = x + cardW / 2, ly = py + ph / 2;
+      ctx.strokeStyle = 'rgba(232,234,237,.9)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(lx, ly - 3, 4, Math.PI, 0);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(232,234,237,.9)';
+      roundRect(lx - 5.5, ly - 3, 11, 9, 2);
+      ctx.fill();
+    }
+
+    // 名称：未拥有降一档明度
+    ctx.fillStyle = owned ? UI.ink : UI.ink2;
+    ctx.font = uiFont(600, 15);
+    ctx.fillText(m.name, x + cardW / 2, y + 70);
+
+    // 状态：选中与未拥有才显示文字
+    if (selected) {
+      ctx.fillStyle = UI.ink2;
+      ctx.font = uiFont(500, 11);
+      ctx.fillText('使用中', x + cardW / 2, y + 94);
+    } else if (!owned) {
+      ctx.fillStyle = totalCoins >= m.price ? UI.gold : UI.ink3;
+      ctx.font = uiFont(500, 11);
+      ctx.fillText(m.price + ' 金币', x + cardW / 2, y + 94);
+    }
+
+    mapSlots.push({ x, y, w: cardW, h: cardH, index: i });
+  });
+
+  ctx.restore();
+
+  // 列表渐隐，暗示列表可继续下滑
+  if (maxScroll > 0) drawListFade(cy + 92, cy + 356, mapsScroll > 2);
+
+  // 返回主页
+  mapBackBtn.w = 150; mapBackBtn.h = 38;
+  mapBackBtn.x = W / 2 - 75; mapBackBtn.y = cy + 368;
+  drawButton(mapBackBtn, '返回', false);
+}
+
+// 设置页的列表行：无底无边，只用一条发丝线收口
+function drawSettingsRow(btn, label, rightText) {
+  const down = pressedBtn && pressedBtn.ref === btn;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = down ? UI.ink : UI.ink;
+  ctx.font = uiFont(500, 15);
+  ctx.fillText(label, btn.x, btn.y + btn.h / 2 + 1);
+
+  const right = btn.x + btn.w;
+  if (rightText) {
+    ctx.textAlign = 'right';
+    ctx.fillStyle = UI.ink3;
+    ctx.font = uiFont(500, 11);
+    ctx.fillText(rightText, right - 18, btn.y + btn.h / 2 + 1);
+  }
+  ctx.textAlign = 'right';
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(400, 15);
+  ctx.fillText('›', right, btn.y + btn.h / 2 + 1);
+
+  ctx.fillStyle = UI.line;
+  ctx.fillRect(btn.x, btn.y + btn.h, btn.w, 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawSettingsOverlay() {
+  drawBackdrop();
+  const ch = 280;
+  const cy = drawCard(ch);
+
+  // 页头：标题 + 说明，版本号安静地藏在右上角
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(600, 20);
+  ctx.fillText('设置', 44, cy + 44);
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 11);
+  ctx.fillText('兑换码与更新日志', 44, cy + 68);
+  ctx.textAlign = 'right';
+  ctx.font = uiFont(500, 10);
+  ctx.fillText(APP_VERSION, W - 44, cy + 45);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+
+  // 兑换码 / 更新日志：两行分隔线式菜单
+  redeemBtn.w = W - 88; redeemBtn.h = 56;
+  redeemBtn.x = 44; redeemBtn.y = cy + 94;
+  drawSettingsRow(redeemBtn, '兑换码', '');
+
+  logBtn.w = W - 88; logBtn.h = 56;
+  logBtn.x = 44; logBtn.y = cy + 150;
+  drawSettingsRow(logBtn, '更新日志', APP_VERSION);
+
+  // 最近一次兑换结果提示（固定占位，避免版式跳动）
+  ctx.textAlign = 'center';
+  if (redeemMsg) {
+    const ok = redeemMsg.indexOf('成功') === 0;
+    ctx.fillStyle = ok ? UI.gold : UI.ink3;
+    ctx.font = uiFont(500, 12);
+    ctx.fillText(redeemMsg, W / 2, cy + 222);
+  }
+
+  // 返回主页
+  settingsBackBtn.w = 200; settingsBackBtn.h = 40;
+  settingsBackBtn.x = W / 2 - 100; settingsBackBtn.y = cy + 228;
+  drawButton(settingsBackBtn, '返回', false);
+
+  // 兑换码浮层面板（自绘 + 隐藏 input 接收软键盘）
+  if (redeemOpen) {
+    ctx.fillStyle = 'rgba(10,12,15,.80)';
+    ctx.fillRect(0, 0, W, H);
+
+    const pw = W - 80, ph = 232, px = 40, py = H / 2 - ph / 2;
+    uiPanel(px, py, pw, ph, RAD.card, true, true);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = UI.ink;
+    ctx.font = uiFont(600, 19);
+    ctx.fillText('兑换码', W / 2, py + 42);
+    ctx.fillStyle = UI.ink3;
+    ctx.font = uiFont(500, 11);
+    ctx.fillText('输入内测兑换码领取奖励', W / 2, py + 66);
+    ctx.textBaseline = 'alphabetic';
+
+    // 输入框：由真实可见 input 占据该区域（边框/背景/占位/文字均由 input 呈现），canvas 只负责定位
+    codeField.w = 262; codeField.h = 44;
+    codeField.x = W / 2 - 131; codeField.y = py + 84;
+
+    // 确认 / 取消
+    const bw = 118, bh = 40, bgap = 12;
+    const bx = W / 2 - bw - bgap / 2;
+    redeemConfirmBtn.w = bw; redeemConfirmBtn.h = bh;
+    redeemConfirmBtn.x = bx; redeemConfirmBtn.y = py + 150;
+    redeemCancelBtn.w = bw; redeemCancelBtn.h = bh;
+    redeemCancelBtn.x = bx + bw + bgap; redeemCancelBtn.y = py + 150;
+    drawButton(redeemConfirmBtn, '确认', true);
+    drawButton(redeemCancelBtn, '取消', false);
+
+    if (redeemMsg) {
+      const ok = redeemMsg.indexOf('成功') === 0;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = ok ? UI.gold : UI.ink3;
+      ctx.font = uiFont(500, 12);
+      ctx.fillText(redeemMsg, W / 2, py + 206);
+    }
+    placeCodeInput();
+  }
+}
+
+// ---------- 更新日志 ----------
+// 按可用宽度把一行文案折成多行（按字测量，中文折行稳定）
+function wrapTextLines(text, maxW) {
+  const lines = [];
+  let line = '';
+  for (const ch of text) {
+    const test = line + ch;
+    if (ctx.measureText(test).width > maxW && line) {
+      lines.push(line);
+      line = ch;
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function drawLogOverlay() {
+  drawBackdrop();
+  const cardY = 80, cardH = 560;
+  uiPanel(28, cardY, W - 56, cardH, RAD.card, true);
+
+  // 标题区
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(600, 20);
+  ctx.fillText('更新日志', 44, cardY + 40);
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 11);
+  ctx.fillText('每个版本改了什么，都记在这里', 44, cardY + 64);
+  ctx.textBaseline = 'alphabetic';
+
+  // 标题分隔线
+  ctx.fillStyle = UI.line;
+  ctx.fillRect(44, cardY + 84, W - 88, 1);
+
+  // 先量高度：条目 = 版本行 22 + 正文各行 17 + 段末留白 14
+  const itemFont = uiFont(500, 11);
+  const maxTextW = 306;
+  let contentH = 0;
+  const rows = CHANGELOG.map(e => {
+    ctx.font = itemFont;
+    const lines = e.items.map(t => wrapTextLines(t, maxTextW));
+    const lineCount = lines.reduce((a, b) => a + b.length, 0);
+    const h = 22 + lineCount * 17 + 14;
+    contentH += h;
+    return { e, lines, h };
+  });
+
+  const listTop = cardY + 96;
+  const listBottom = cardY + 470;
+  const listH = listBottom - listTop;
+  const maxScroll = Math.max(0, contentH - listH);
+  logScroll = clampScroll(logScroll, maxScroll);
+  logView = { top: listTop, h: listH, contentH };
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(28, listTop, W - 56, listH);
+  ctx.clip();
+  ctx.translate(0, -logScroll);
+
+  let y = listTop + 8;
+  rows.forEach(({ e, lines, h }) => {
+    // 版本号
+    ctx.textAlign = 'left';
+    ctx.fillStyle = UI.ink3;
+    ctx.font = uiFont(600, 12);
+    ctx.fillText(e.v, 44, y + 12);
+    const vw = ctx.measureText(e.v).width;
+    // 本次主题
+    ctx.fillStyle = UI.ink;
+    ctx.font = uiFont(600, 13);
+    ctx.fillText(e.name, 44 + vw + 10, y + 12);
+
+    // 改动点：小圆点 + 自动折行
+    ctx.font = itemFont;
+    let ly = y + 30;
+    lines.forEach((segs) => {
+      ctx.fillStyle = UI.ink3;
+      ctx.beginPath();
+      ctx.arc(48, ly - 4, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.textAlign = 'left';
+      ctx.fillStyle = UI.ink2;
+      ctx.font = itemFont;
+      segs.forEach((seg, k) => ctx.fillText(seg, 56, ly + k * 17));
+      ly += segs.length * 17;
+    });
+    y += h;
+  });
+
+  ctx.restore();
+
+  // 列表边缘渐隐，提示可继续下滑
+  if (maxScroll > 0) drawListFade(listTop, listBottom, logScroll > 2);
+
+  // 底部固定返回
+  ctx.fillStyle = UI.line;
+  ctx.fillRect(44, cardY + 480, W - 88, 1);
+  logBackBtn.w = 180; logBackBtn.h = 38;
+  logBackBtn.x = W / 2 - 90; logBackBtn.y = cardY + 490;
+  drawButton(logBackBtn, '返回设置', false);
+}
+
+function drawDeadOverlay() {
+  drawBackdrop();
+  const can = canRevive();
+  const showRevive = !revivedThisRun; // 本局未复活过才展示复活区
+  const ch = showRevive ? 316 : 240;
+  const cy = drawCard(ch);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  // 层级：小标签 → 最大分数 → 最佳 → 复活行 → 主/次按钮
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 11);
+  ctx.fillText('游戏结束', W / 2, cy + 42);
+  ctx.fillStyle = UI.ink;
+  ctx.font = uiFont(700, 44);
+  ctx.fillText(String(score), W / 2, cy + 84);
+  ctx.fillStyle = UI.ink3;
+  ctx.font = uiFont(500, 11);
+  ctx.fillText('最佳 ' + best, W / 2, cy + 114);
+
+  let btnY;
+  if (showRevive) {
+    // 复活行：无底板，一行文字 + 右侧钻石价，不足时整体降权
+    reviveBtn.w = W - 88; reviveBtn.h = 56;
+    reviveBtn.x = 44; reviveBtn.y = cy + 138;
+    ctx.save();
+    if (!can) ctx.globalAlpha = 0.45;
+    drawDiamondIcon(reviveBtn.x + 8, reviveBtn.y + 26, 6);
+    ctx.restore();
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = can ? UI.ink : UI.ink3;
+    ctx.font = uiFont(600, 15);
+    ctx.fillText('复活一次', reviveBtn.x + 24, reviveBtn.y + 22);
+    ctx.fillStyle = UI.ink3;
+    ctx.font = uiFont(500, 10);
+    ctx.fillText('保留本局分数与进度', reviveBtn.x + 24, reviveBtn.y + 40);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = can ? UI.ink2 : UI.ink3;
+    ctx.font = uiFont(600, 14);
+    ctx.fillText(String(REVIVE_COST), reviveBtn.x + reviveBtn.w - 4, reviveBtn.y + 28);
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = UI.ink3;
+    ctx.font = uiFont(500, 10);
+    ctx.fillText('持有 ' + totalDiamonds + ' 钻石' + (can ? '' : ' · 不足'), W / 2, cy + 218);
+    btnY = cy + 240;
+  } else {
+    btnY = cy + 168;
+  }
+
+  // 主操作用实心胶囊，返回降为纯文字
+  deadRestartBtn.w = 150; deadRestartBtn.h = 46;
+  deadRestartBtn.x = W / 2 - 158; deadRestartBtn.y = btnY;
+  deadHomeBtn.w = 150; deadHomeBtn.h = 46;
+  deadHomeBtn.x = W / 2 + 8; deadHomeBtn.y = btnY;
+  drawButton(deadRestartBtn, '再来一局', true);
+  drawButton(deadHomeBtn, '返回主页', false);
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+}
+
+function drawSkinPicker(y) {
+  skinDots.length = 0;
+  const gap = 38;
+  const startX = W / 2 - ((skins.length - 1) * gap) / 2;
+  skins.forEach((s, i) => {
+    const x = startX + i * gap;
+    const has = isOwned(i);
+    if (i === skinIndex) {
+      ctx.strokeStyle = 'rgba(232,234,237,.85)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, 16, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    const dotR = pressedDot === i ? 9 : 11;
+    ctx.save();
+    if (!has) ctx.globalAlpha = 0.32;
+    ctx.fillStyle = s.body;
+    ctx.beginPath();
+    ctx.arc(x, y, dotR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    if (!has) {
+      // 小锁标记
+      ctx.strokeStyle = 'rgba(232,234,237,.85)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(x, y - 2, 3, Math.PI, 0);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(232,234,237,.85)';
+      roundRect(x - 4.5, y - 2, 9, 7, 2);
+      ctx.fill();
+    }
+    skinDots.push({ x, y, r: 16, index: i });
+  });
+}
+
+function drawPlayer() {
+  const s = skins[skinIndex];
+  const px = player.x;
+  const py = player.y - player.h;
+  const headH = 18;
+  const bodyH = player.h - headH - 10;
+
+  // 受击无敌期：按节奏闪烁
+  ctx.save();
+  // 形变：以脚底为锚点做压扁 / 拉伸，起跳落地更有重量感（纯视觉，不影响碰撞盒）
+  if (squash !== 0) {
+    const anchorX = player.x + player.w / 2;
+    ctx.translate(anchorX, player.y);
+    ctx.scale(1 + squash * 0.12, 1 - squash * 0.14);
+    ctx.translate(-anchorX, -player.y);
+  }
+  if (invuln > 0) {
+    const blink = Math.floor(invuln * 10) % 2 === 0;
+    ctx.globalAlpha = blink ? 1 : 0.35;
+  }
+
+  // 腿（跑步摆动）
+  ctx.fillStyle = s.body;
+  if (player.onGround) {
+    const leg = Math.sin(player.runFrame) > 0 ? 1 : -1;
+    ctx.fillRect(px + 5, py + player.h - 10, 10, 10 + leg * 3);
+    ctx.fillRect(px + player.w - 15, py + player.h - 10, 10, 10 - leg * 3);
+  } else {
+    ctx.fillRect(px + 5, py + player.h - 10, 10, 8);
+    ctx.fillRect(px + player.w - 15, py + player.h - 10, 10, 8);
+  }
+  // 鞋
+  ctx.fillStyle = s.shoe;
+  ctx.fillRect(px + 3, py + player.h - 4, 12, 4);
+  ctx.fillRect(px + player.w - 15, py + player.h - 4, 12, 4);
+
+  // 翅膀（飞行中在背后左侧展开，随节奏扇动；先画，被躯干自然遮住根部）
+  if (flyTimer > 0) {
+    const baseX = px;
+    const baseY = py + headH + bodyH * 0.4;
+    const flap = Math.sin(player.runFrame * 2.4) * 0.35;
+    ctx.save();
+    ctx.translate(baseX, baseY);
+    ctx.rotate(flap - 0.12);
+    // 上羽（亮白）
+    ctx.fillStyle = 'rgba(238,246,250,.95)';
+    roundRect(-27, -17, 27, 11, 5);
+    ctx.fill();
+    // 下羽（浅青）
+    ctx.fillStyle = 'rgba(190,224,238,.9)';
+    roundRect(-24, -5, 24, 11, 5);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 躯干
+  ctx.fillStyle = s.body;
+  ctx.fillRect(px, py + headH, player.w, bodyH);
+  if (s.camo) {
+    ctx.fillStyle = s.camo1;
+    ctx.fillRect(px + 4, py + headH + 6, 10, 8);
+    ctx.fillRect(px + player.w - 16, py + headH + bodyH - 12, 12, 8);
+    ctx.fillStyle = s.camo2;
+    ctx.fillRect(px + player.w - 14, py + headH + 4, 9, 7);
+  }
+  ctx.fillStyle = 'rgba(0,0,0,.10)';
+  ctx.fillRect(px + player.w - 8, py + headH, 8, bodyH);
+
+  // 头
+  ctx.fillStyle = s.head;
+  ctx.fillRect(px, py, player.w, headH);
+  if (s.camo) {
+    ctx.fillStyle = s.camo1;
+    ctx.fillRect(px + 5, py + 8, 9, 6);
+    ctx.fillStyle = s.camo2;
+    ctx.fillRect(px + player.w - 13, py + 9, 8, 5);
+  }
+
+  // 帽子（按已装备帽子绘制：默认帽檐 / 牛仔帽）
+  const hat = HATS[hatIndex] || HATS[0];
+  if (hat.id === 'cowboy') {
+    // 宽帽檐（左右略伸出，压在头顶边缘，不深入额头）
+    ctx.fillStyle = hat.brim;
+    roundRect(px - 5, py - 1, player.w + 10, 5, 2);
+    ctx.fill();
+    // 帽冠：宽度贴合头部（左右各收 2px），底部落在头顶 py，不压进头部
+    ctx.fillStyle = hat.crown;
+    roundRect(px + 2, py - 9, player.w - 4, 9, 3);
+    ctx.fill();
+    // 帽带：压在帽冠底部与帽檐交界
+    ctx.fillStyle = hat.band;
+    ctx.fillRect(px + 2, py - 3, player.w - 4, 3);
+  } else {
+    ctx.fillStyle = s.accent;
+    ctx.fillRect(px, py, player.w, 6);
+    ctx.fillRect(px + player.w - 4, py + 2, 10, 4);
+  }
+
+  // 表情：临时情绪优先；无临时情绪时按动作推导主表情（奔跑 / 跳跃 / 下落 / 飞行）
+  let autoFace = 'run';
+  if (flyTimer > 0) autoFace = 'fly';
+  else if (!player.onGround) autoFace = player.vy < 0 ? 'jump' : 'fall';
+  const face = (emote !== 'idle') ? emote : autoFace;
+
+  const eyeX = px + player.w - 12, eyeY = py + 9;
+  const ink = '#14161a', mouthInk = '#5b2b2b';
+  ctx.fillStyle = ink;
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 1.5;
+
+  if (face === 'run') {
+    // 专注奔跑：周期性眨眼，轻闭口
+    if (blinkOn) {
+      ctx.beginPath();
+      ctx.moveTo(eyeX, eyeY + 3);
+      ctx.lineTo(eyeX + 6, eyeY + 3);
+      ctx.stroke();
+    } else {
+      ctx.fillRect(eyeX, eyeY, 6, 6);
+    }
+    ctx.fillStyle = mouthInk;
+    ctx.fillRect(eyeX + 1, eyeY + 9, 4, 2);
+    ctx.fillStyle = ink;
+  } else if (face === 'jump') {
+    // 用力起跳：上挑眉 + 圆眼 + 张嘴
+    ctx.beginPath();
+    ctx.moveTo(eyeX, eyeY - 2);
+    ctx.lineTo(eyeX + 6, eyeY - 4);
+    ctx.stroke();
+    ctx.fillRect(eyeX - 1, eyeY - 1, 7, 7);
+    ctx.fillStyle = mouthInk;
+    ctx.fillRect(eyeX, eyeY + 8, 6, 4);
+    ctx.fillStyle = ink;
+  } else if (face === 'fall') {
+    // 下落惊讶：大圆眼 + 小 O 嘴
+    ctx.fillRect(eyeX - 1, eyeY - 1, 7, 7);
+    ctx.fillStyle = 'rgba(255,255,255,.9)';
+    ctx.fillRect(eyeX + 4, eyeY + 1, 2, 2);
+    ctx.fillStyle = mouthInk;
+    ctx.fillRect(eyeX + 2, eyeY + 8, 3, 3);
+    ctx.fillStyle = ink;
+  } else if (face === 'fly') {
+    // 飞行自由：闭眼微笑
+    ctx.beginPath();
+    ctx.arc(eyeX + 3, eyeY + 3, 3, 0.1 * Math.PI, 0.9 * Math.PI);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(eyeX + 3, eyeY + 9, 3, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.stroke();
+  } else if (face === 'wow') {
+    // 二段跳惊讶：圆眼高光 + 张嘴
+    ctx.fillRect(eyeX - 1, eyeY - 1, 7, 7);
+    ctx.fillStyle = 'rgba(255,255,255,.9)';
+    ctx.fillRect(eyeX + 4, eyeY + 1, 2, 2);
+    ctx.fillStyle = mouthInk;
+    ctx.fillRect(eyeX + 1, eyeY + 8, 5, 4);
+    ctx.fillStyle = ink;
+  } else if (face === 'happy') {
+    // 弯眼 + 笑嘴
+    ctx.beginPath();
+    ctx.arc(eyeX + 3, eyeY + 3, 3, Math.PI, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(eyeX + 3, eyeY + 9, 3, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.stroke();
+  } else if (face === 'excited') {
+    // 兴奋：大眼高光 + 大笑嘴
+    ctx.fillRect(eyeX - 1, eyeY - 1, 8, 8);
+    ctx.fillStyle = 'rgba(255,255,255,.9)';
+    ctx.fillRect(eyeX + 5, eyeY, 2, 2);
+    ctx.fillStyle = mouthInk;
+    ctx.fillRect(eyeX, eyeY + 8, 6, 4);
+    ctx.fillStyle = ink;
+  } else if (face === 'hurt') {
+    // 痛苦：×眼 + 下撇嘴
+    ctx.beginPath();
+    ctx.moveTo(eyeX, eyeY); ctx.lineTo(eyeX + 6, eyeY + 6);
+    ctx.moveTo(eyeX + 6, eyeY); ctx.lineTo(eyeX, eyeY + 6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(eyeX + 3, eyeY + 12, 3, 1.15 * Math.PI, 1.85 * Math.PI);
+    ctx.stroke();
+  } else if (face === 'dead') {
+    // 晕倒：×眼 + 下垂嘴
+    ctx.beginPath();
+    ctx.moveTo(eyeX, eyeY); ctx.lineTo(eyeX + 6, eyeY + 6);
+    ctx.moveTo(eyeX + 6, eyeY); ctx.lineTo(eyeX, eyeY + 6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(eyeX + 3, eyeY + 12, 3, 1.15 * Math.PI, 1.85 * Math.PI);
+    ctx.stroke();
+  } else {
+    ctx.fillRect(eyeX, eyeY, 6, 6);
+  }
+
+  // 限时道具光环：冲刺金 / 护盾蓝 / 磁铁紫
+  if (shieldOn || dashTimer > 0 || magnetTimer > 0) {
+    const halo = dashTimer > 0 ? 'rgba(242,193,78,.30)'
+      : shieldOn ? 'rgba(95,198,224,.30)'
+      : 'rgba(139,151,242,.28)';
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(px + player.w / 2, py + player.h / 2, player.w * 0.95, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+initScenery();
+reset();
+state = 'splash';
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
